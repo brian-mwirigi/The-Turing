@@ -28,6 +28,8 @@ const DEMO_BRANCH_URLS: Record<BranchId, string> = {
   alert: "/canvas/branch_alert.mp4",
   reboot: "/canvas/branch_reboot.mp4",
   neutral: "/canvas/branch_neutral.mp4",
+  // Veo 3.1 has no procedural fallback; reuse reboot clip so slow-mo + crossfade still demo cleanly.
+  veo31: "/canvas/branch_reboot.mp4",
 };
 
 // ============================================================================

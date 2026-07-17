@@ -206,6 +206,8 @@ function branchColor(branch: string): string {
       return "bg-rose-400";
     case "reboot":
       return "bg-sky-400";
+    case "veo31":
+      return "bg-fuchsia-400";
     case "neutral":
       return "bg-cyan-400";
     default:

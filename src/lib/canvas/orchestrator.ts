@@ -1,11 +1,17 @@
 /**
- * Orchestrator: maps a detected object's semantic role to an A2UI surface.
+ * Orchestrator: deterministic fallback paths for the LLM-driven pipeline.
  *
- * In a full A2UI deployment, an LLM agent (Gemini / Claude) would generate
- * the surface JSON dynamically. For the hackathon, we use a deterministic
- * catalog keyed by semantic role — this guarantees stable, fast demos while
- * still exercising the full A2UI message protocol (create/update/delete ops,
- * nonces, surface anchoring).
+ * The primary orchestration path is now LLM-authored (see `llm-orchestrator.ts`):
+ * the LLM emits an A2UI surface for a clicked object and rewrites the
+ * extend-video prompt for the user's chosen action.
+ *
+ * This module plays two roles:
+ *   1. Pure geometry: hit-test detections, return the object under the click,
+ *      and (when called) produce the A2UI message from a *given* surface spec.
+ *      This is model-agnostic and always runs.
+ *   2. Deterministic fallback: `SURFACE_CATALOG` (when the LLM call fails) and
+ *      `planBranchForAction` (when the LLM rewrite fails). These guarantee
+ *      the demo always works even without `FAL_KEY`.
  *
  * The catalog is trivially extensible: add a new role → add a new entry.
  */
@@ -56,17 +62,17 @@ function code(id: string, content: string): A2UIComponent {
 }
 
 // ============================================================================
-// Surface catalog (per semantic role)
+// Surface catalog (per semantic role) — fallback when LLM surface gen fails
 // ============================================================================
 
-interface SurfaceSpec {
+export interface SurfaceSpec {
   semanticRole: SemanticRole;
   reason: string;
   build: (obj: DetectedObject) => A2UIComponent;
   suggestedBranch?: BranchId;
 }
 
-const SURFACE_CATALOG: Record<SemanticRole, SurfaceSpec> = {
+export const SURFACE_CATALOG: Record<SemanticRole, SurfaceSpec> = {
   faulty_asset: {
     semanticRole: "faulty_asset",
     reason: "Detected asset reporting thermal / electrical fault. Surfacing diagnostic + mitigation controls.",
@@ -167,19 +173,71 @@ const SURFACE_CATALOG: Record<SemanticRole, SurfaceSpec> = {
 // Orchestration entry point
 // ============================================================================
 
+export interface OrchestrateResult {
+  detectedObject: DetectedObject | null;
+  a2ui: A2UIMessage;
+  suggestedBranch?: BranchId;
+}
+
+/**
+ * Given a click + detected objects, find the object under the cursor.
+ * Used by both the LLM-driven and deterministic code paths.
+ */
+export function findClickedObject(
+  click: { x: number; y: number },
+  detections: DetectedObject[]
+): DetectedObject | null {
+  const candidates = detections.filter((d) => isPointInBBox(click, d.bbox));
+  return candidates.sort((a, b) => bboxArea(a.bbox) - bboxArea(b.bbox))[0] ?? null;
+}
+
+/**
+ * Construct the A2UI message that creates a surface for the given object.
+ * If `surfaceSpec` is provided (the LLM-authored path), use it; otherwise
+ * fall back to the deterministic `SURFACE_CATALOG`.
+ */
+export function buildSurfaceMessage(
+  detected: DetectedObject,
+  surfaceSpec?: { root: A2UIComponent; reason?: string; suggestedBranch?: BranchId }
+): { a2ui: A2UIMessage; suggestedBranch?: BranchId } {
+  let root: A2UIComponent;
+  let reason: string;
+  let suggestedBranch: BranchId | undefined;
+
+  if (surfaceSpec) {
+    root = surfaceSpec.root;
+    reason = surfaceSpec.reason ?? "LLM-authored surface";
+    suggestedBranch = surfaceSpec.suggestedBranch;
+  } else {
+    const spec = SURFACE_CATALOG[detected.semanticRole ?? "unknown"];
+    root = spec.build(detected);
+    reason = spec.reason;
+    suggestedBranch = spec.suggestedBranch;
+  }
+
+  const surface: A2UISurface = {
+    id: `surface_${detected.id}`,
+    anchor: detected.bbox,
+    semanticRole: detected.semanticRole ?? "unknown",
+    root,
+    reason,
+  };
+  const op: A2UIOperation = { kind: "create_surface", surface };
+  return { a2ui: { nonce: makeNonce(), operations: [op] }, suggestedBranch };
+}
+
 /**
  * Given a click + detected objects, find the object under the cursor and
- * produce the appropriate A2UI message.
+ * produce an A2UI message from the deterministic catalog (fallback path).
  */
 export function orchestrate(req: OrchestrateRequest, detections: DetectedObject[]): OrchestrateResponse {
   const t0 = Date.now();
 
-  // Find the topmost (smallest area) detection containing the click
-  const candidates = detections.filter((d) => isPointInBBox(req.click, d.bbox));
-  const detected = candidates.sort((a, b) => bboxArea(a.bbox) - bboxArea(b.bbox))[0] ?? null;
+  const detected = findClickedObject(req.click, detections);
 
   if (!detected) {
     return {
+      detections,
       detectedObject: null,
       a2ui: { nonce: makeNonce(), operations: [{ kind: "clear" }] },
       timings: {
@@ -190,22 +248,12 @@ export function orchestrate(req: OrchestrateRequest, detections: DetectedObject[
     };
   }
 
-  const spec = SURFACE_CATALOG[detected.semanticRole ?? "unknown"];
-  const surface: A2UISurface = {
-    id: `surface_${detected.id}`,
-    anchor: detected.bbox,
-    semanticRole: spec.semanticRole,
-    root: spec.build(detected),
-    reason: spec.reason,
-  };
-
-  const op: A2UIOperation = { kind: "create_surface", surface };
-  const a2ui: A2UIMessage = { nonce: makeNonce(), operations: [op] };
-
+  const { a2ui, suggestedBranch } = buildSurfaceMessage(detected);
   return {
+    detections,
     detectedObject: detected,
     a2ui,
-    suggestedBranch: spec.suggestedBranch,
+    suggestedBranch,
     timings: {
       detectionMs: 0,
       orchestrationMs: Date.now() - t0,
@@ -216,13 +264,19 @@ export function orchestrate(req: OrchestrateRequest, detections: DetectedObject[
 
 /**
  * Given a user action selected in a surface, produce the updated prompt
- * and target branch for the next LTX-2.3 generation.
+ * and target branch for the next LTX-2.3 generation. Deterministic fallback
+ * used when the LLM rewrite call fails (or `FAL_KEY` is absent).
  */
 export function planBranchForAction(action: UserAction): {
   branch: BranchId;
   promptSuffix: string;
 } {
   const map: Record<string, { branch: BranchId; promptSuffix: string }> = {
+    summon_operator: {
+      branch: "veo31",
+      promptSuffix:
+        " — a uniformed operator strides into frame from the left, emergency lighting floods the room, the camera pushes in dramatically, the faulty rack locks down under their authority, hero beat",
+    },
     trigger_alert: {
       branch: "alert",
       promptSuffix: " — emergency lighting activates, red alert pulses across the room, sparks intensify on the faulty rack, alarm klaxon visuals",

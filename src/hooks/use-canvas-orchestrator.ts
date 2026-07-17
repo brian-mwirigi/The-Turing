@@ -4,14 +4,14 @@
  * useCanvasOrchestrator
  *
  * Wires together:
- *   1. Frame capture from the <video> element (canvas → toDataURL → base64)
- *   2. POST /api/canvas/orchestrate (Florence-2 detection + A2UI generation)
- *   3. Apply the A2UI message to the store
- *   4. Enter slow-mo latency-masking mode
- *   5. On user action: POST /api/canvas/generate (LTX-2.3 extension) →
- *      commit new branch + exit slow-mo
- *
- * This is the orchestration layer that ties the whole pipeline together.
+ *   1. Frame  capture from the <video> element (canvas → toDataURL → base64 JPEG)
+ *      used as Florence-2 input AND as the Veo 3.1 seed image.
+ *   2. Clip   capture via MediaRecorder (~2s mp4) used as the LTX-2.3
+ *      extend-video `video_url` source (uploaded server-side via fal.storage).
+ *   3. POST /api/canvas/orchestrate (Florence-2 + LLM A2UI surface)
+ *   4. Apply the A2UI message to the store; enter slow-mo.
+ *   5. On user action: POST /api/canvas/generate (multipart, mp4 + frame) →
+ *      commit new branch + exit slow-mo.
  */
 
 import { useCallback, useRef, useState } from "react";
@@ -33,8 +33,9 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
   const [lastTimings, setLastTimings] = useState<{ detectionMs: number; orchestrationMs: number; totalMs: number }>();
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Capture the current video frame as a base64 JPEG (quality 0.95 to avoid
-  // the artifact-amplification trap documented in the strategic analysis)
+  // ---------------------------------------------------------------------------
+  // Frame capture (single JPEG) — used for Florence-2 detection and Veo seed
+  // ---------------------------------------------------------------------------
   const captureFrame = useCallback((): string | null => {
     const video = videoRef.current;
     if (!video) return null;
@@ -42,7 +43,6 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
     const h = video.videoHeight;
     if (!w || !h) return null;
     const canvas = document.createElement("canvas");
-    // Capture at 720p max to keep payload reasonable
     const scale = Math.min(1, 1280 / w);
     canvas.width = Math.floor(w * scale);
     canvas.height = Math.floor(h * scale);
@@ -52,7 +52,71 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
     return canvas.toDataURL("image/jpeg", 0.95);
   }, [videoRef]);
 
-  // Handle a click on the video: capture frame, send to orchestrator
+  // ---------------------------------------------------------------------------
+  // Clip capture (recent ~2s) — mp4 blob for LTX-2.3 extend-video
+  //
+  // Strategy: captureStream(captureFrameRate=0) clones the live <video>
+  // element's current stream; we record for 2s, then stop and yield the blob.
+  // ---------------------------------------------------------------------------
+  const captureRecentVideo = useCallback(
+    async (durationMs = 2000): Promise<Blob | null> => {
+    const video = videoRef.current;
+    if (!video) return null;
+    // `captureStream` is non-standard on Safari/Firefox (mozCaptureStream).
+    // We cast through a permissive interface rather than extending lib.dom.
+    type CaptureableVideo = HTMLVideoElement & {
+      captureStream?: (frameRate?: number) => MediaStream;
+      mozCaptureStream?: (frameRate?: number) => MediaStream;
+    };
+    const captureable = video as CaptureableVideo;
+    const streamFn = captureable.captureStream ?? captureable.mozCaptureStream;
+    if (!streamFn) {
+      // Safari fallback — capture a few frames via canvas into a stream.
+      return null;
+    }
+    try {
+      const stream = streamFn.call(video, 30);
+      if (!stream) return null;
+
+        // Pick the best supported video mime; prefer mp4 if supported
+        const mimes = [
+          "video/mp4;codecs=h264",
+          "video/mp4",
+          "video/webm;codecs=vp9",
+          "video/webm;codecs=vp8",
+          "video/webm",
+        ];
+        const mime = mimes.find((m) =>
+          typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)
+        ) ?? "video/webm";
+
+        const chunks: Blob[] = [];
+        const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+        return await new Promise<Blob | null>((resolve) => {
+          recorder.onstop = () => {
+            stream.getTracks().forEach((t) => t.stop());
+            if (chunks.length === 0) return resolve(null);
+            resolve(new Blob(chunks, { type: mime }));
+          };
+          recorder.start();
+          setTimeout(() => {
+            if (recorder.state !== "inactive") recorder.stop();
+          }, durationMs);
+        });
+      } catch (err) {
+        console.error("[captureRecentVideo] error:", err);
+        return null;
+      }
+    },
+    [videoRef]
+  );
+
+  // ---------------------------------------------------------------------------
+  // Click → orchestrate (Florence-2 + LLM surface)
+  // ---------------------------------------------------------------------------
   const handleClick = useCallback(
     async (xNorm: number, yNorm: number) => {
       if (isProcessing) return;
@@ -74,7 +138,7 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
         if (!res.ok) throw new Error(`orchestrate failed: ${res.status}`);
         const data = (await res.json()) as OrchestrateResponse;
         applyOrchestration(data);
-        registerDetections(data.detectedObject ? [data.detectedObject] : []);
+        registerDetections(data.detections ?? []);
         setLastTimings(data.timings);
         if (data.detectedObject) {
           // Enter slow-mo to mask the upcoming generation latency
@@ -88,10 +152,12 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
         setIsProcessing(false);
       }
     },
-    [isProcessing, captureFrame, branch, applyOrchestration, registerDetections, setHoverObject, setLastTimings, enterSlowMo, logAction]
+    [isProcessing, captureFrame, branch, applyOrchestration, registerDetections, setHoverObject, enterSlowMo, logAction]
   );
 
-  // Handle an action selected in an A2UI surface
+  // ---------------------------------------------------------------------------
+  // Action → generate (mp4 + frame POST → LTX-2.3 extend or Veo 3.1 hero)
+  // ---------------------------------------------------------------------------
   const handleAction = useCallback(
     async (action: UserAction) => {
       if (isGenerating) return;
@@ -99,24 +165,40 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
       clearSurfaces();
       logAction(`Action: ${action.label} (${action.actionId})`, "action");
       try {
-        // Capture current frame as the extension seed
+        // Capture the current frame (JPEG seed for Veo / Florence fallback)
         const lastFrame = captureFrame();
+        // Capture the most recent ~2s as an mp4 blob for LTX extend-video.
+        const lastFrameVideo = await captureRecentVideo(2000);
+
+        const fd = new FormData();
+        fd.append("action", JSON.stringify(action));
+        fd.append("currentBranch", branch);
+        fd.append("sceneId", "main");
+        if (lastFrame) fd.append("lastFrame", lastFrame);
+        if (lastFrameVideo) {
+          fd.append(
+            "lastFrameVideo",
+            new File([lastFrameVideo], `capture-${Date.now()}.mp4`, {
+              type: lastFrameVideo.type || "video/mp4",
+            })
+          );
+        }
+
         const res = await fetch("/api/canvas/generate", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action,
-            currentBranch: branch,
-            lastFrame,
-            sceneId: "main",
-          }),
+          body: fd,
         });
         if (!res.ok) throw new Error(`generate failed: ${res.status}`);
         const data = await res.json();
         // Commit the new branch — this triggers the crossfade in DoubleBufferedVideo
-        commitBranch(data.branch, data.chunk.source === "ltx23" ? data.chunk.url : undefined);
+        const source = data.chunk?.source ?? "demo";
+        const useLiveUrl = source === "ltx23" || source === "veo31";
+        commitBranch(data.branch, useLiveUrl ? data.chunk.url : undefined);
         exitSlowMo();
-        logAction(`Generated ${data.chunk.source} chunk → ${data.branch}`, "branch");
+        logAction(
+          `Generated ${source} chunk → ${data.branch}${data.fallback ? " (fallback)" : ""}`,
+          "branch"
+        );
       } catch (err) {
         console.error("[generate] error:", err);
         logAction(`Generation error: ${err instanceof Error ? err.message : "unknown"}`, "action");
@@ -125,7 +207,7 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
         setIsGenerating(false);
       }
     },
-    [isGenerating, captureFrame, branch, clearSurfaces, commitBranch, exitSlowMo, logAction]
+    [isGenerating, captureFrame, captureRecentVideo, branch, clearSurfaces, commitBranch, exitSlowMo, logAction]
   );
 
   const dismissAll = useCallback(() => {
@@ -138,6 +220,7 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
     handleAction,
     dismissAll,
     captureFrame,
+    captureRecentVideo,
     isProcessing,
     isGenerating,
     lastTimings,

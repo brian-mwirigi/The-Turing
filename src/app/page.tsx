@@ -40,12 +40,14 @@ export default function Home() {
   const lastDetections = useCanvasStore((s) => s.lastDetections);
   const setHoverObject = useCanvasStore((s) => s.setHoverObject);
   const dismissSurface = useCanvasStore((s) => s.dismissSurface);
+  const setLive = useCanvasStore((s) => s.setLive);
   const isSlowMo = useCanvasStore((s) => s.isSlowMo);
 
   const { handleClick, handleAction, dismissAll, isProcessing, isGenerating, lastTimings } =
     useCanvasOrchestrator(captureVideoRef);
 
-  // Check live mode on mount
+  // Check live mode on mount. Server returns { live, llm } reflecting whether
+  // FAL_KEY is set (live = florence-2/video gen; llm = A2UI surface authoring).
   useEffect(() => {
     fetch("/api/canvas/orchestrate", {
       method: "POST",
@@ -54,14 +56,18 @@ export default function Home() {
     })
       .then((r) => r.json())
       .then((data) => {
-        if (data?.live === true) setIsLive(true);
+        const live = data?.live === true || data?.llm === true;
+        setIsLive(live);
+        setLive(live);
       })
       .catch(() => setIsLive(false));
-  }, []);
+  }, [setLive]);
 
-  // Keep a stable set of detections for the overlay (combines the most recent
-  // orchestration result + the hover target)
-  const detections = lastDetections.length > 0 ? lastDetections : getBootDetections();
+  // Detections for the overlay: use the most recent Florence-2 run. On boot
+  // (before the first run completes) the overlay is empty/clickable — the
+  // first click triggers detection and the box appears; heat-seeking users can
+  // immediately fire `summon_operator` from the keystroke hint in the HUD.
+  const detections = lastDetections;
 
   // Sync the captureVideoRef to the actually-playing <video> in DoubleBufferedVideo.
   // We do this by querying the DOM after mount.
@@ -202,36 +208,9 @@ export default function Home() {
 }
 
 /**
- * Returns the static boot-time detections matching the procedural scene.
- * These are populated client-side so the overlay is interactive immediately
- * (without waiting for the first Florence-2 call).
+ * Escape key handler — mounts a global keydown listener that dismisses all
+ * surfaces when `Escape` is pressed.
  */
-function getBootDetections() {
-  return [
-    {
-      id: "boot_rack_7a",
-      label: "Server Rack 7-A",
-      bbox: { x1: 0.18, y1: 0.20, x2: 0.42, y2: 0.85 },
-      confidence: 0.94,
-      semanticRole: "faulty_asset" as const,
-    },
-    {
-      id: "boot_terminal_1",
-      label: "Control Terminal",
-      bbox: { x1: 0.55, y1: 0.30, x2: 0.92, y2: 0.78 },
-      confidence: 0.92,
-      semanticRole: "operator_interface" as const,
-    },
-    {
-      id: "boot_vent_1",
-      label: "Cooling Vent",
-      bbox: { x1: 0.44, y1: 0.05, x2: 0.62, y2: 0.18 },
-      confidence: 0.90,
-      semanticRole: "hvac_component" as const,
-    },
-  ];
-}
-
 function EscapeKeyHandler({ onEscape, enabled }: { onEscape: () => void; enabled: boolean }) {
   useEffect(() => {
     if (!enabled) return;
