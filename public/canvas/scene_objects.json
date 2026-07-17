@@ -1,0 +1,42 @@
+{
+  "objects": {
+    "server_rack_sparking": {
+      "label": "Server Rack 7-A",
+      "bbox": [
+        0.18,
+        0.2,
+        0.42,
+        0.85
+      ],
+      "semantic_role": "faulty_asset",
+      "description": "Sparking server rack with failing power supply"
+    },
+    "control_terminal": {
+      "label": "Control Terminal",
+      "bbox": [
+        0.55,
+        0.3,
+        0.92,
+        0.78
+      ],
+      "semantic_role": "operator_interface",
+      "description": "Main control terminal displaying system status"
+    },
+    "cooling_vent": {
+      "label": "Cooling Vent",
+      "bbox": [
+        0.44,
+        0.05,
+        0.62,
+        0.18
+      ],
+      "semantic_role": "hvac_component",
+      "description": "Overhead cooling vent with temperature readings"
+    }
+  },
+  "video_dimensions": {
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  }
+}
