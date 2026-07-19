@@ -33,12 +33,9 @@ You do not watch a trailer. You click the desk that made it.
 
 ---
 
-## Two modes
+## Live architecture
 
-| Mode | Trigger | Behavior |
-|------|---------|----------|
-| **DEMO** | `FAL_KEY` unset | Mock detections mapped to cutting-room objects + pre-rendered mp4s from `public/canvas/` + deterministic slate catalog + an artificial latency pause to exercise the slow-mo mask. Fully offline. |
-| **LIVE** | `FAL_KEY` set | Real Florence-2 detection on `fal-ai/florence-2-large/open-vocabulary-detection`. LLM-authored A2UI slates via fal's OpenRouter OpenAI-compatible proxy (`google/gemini-2.5-flash` by default). LTX-2.3 quality extend-video from the last ~2s of captured mp4. Veo 3.1 image-to-video reserved exclusively for the `summon_operator` hero beat (Imogen returns). All gracefully fall back to demo assets when any endpoint returns empty. |
+With `FAL_KEY` set: real Florence-2 detection on `fal-ai/florence-2-large/open-vocabulary-detection`. LLM-authored A2UI slates via fal's OpenRouter OpenAI-compatible proxy (`google/gemini-2.5-flash` by default). LTX-2.3 quality extend-video from the last ~2s of captured mp4. Veo 3.1 image-to-video reserved exclusively for the `summon_operator` hero beat (Imogen returns).
 
 ---
 
@@ -128,7 +125,7 @@ bun run lint                # exit 0
 bun run build
 ```
 
-Without `FAL_KEY`, the app boots straight into DEMO mode and the full interaction loop is exercisable, including the slow-mo latency mask and the pre-rolled cutting-room footage.
+Add `FAL_KEY` to `.env`, then open `http://localhost:3000`.
 
 ---
 
