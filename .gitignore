@@ -60,3 +60,7 @@ public/canvas/demo/chain/
 
 # Local lint dump
 lintout.txt
+
+# Hackathon playbook / private creative bible — keep local only
+PLAYBOOK.md
+STORYLINE.md
