@@ -8,7 +8,7 @@ One streaming hallucination, one agent, one continuation model. The film stock i
 
 ## What it does
 
-You walk in through a black title card. A 1974 cutting room rises on a curved projection surface that parallax-tracks your eye, the projector humming at floor level. No HUD. No chrome. The room is paused — the coffee is cold, the reels are still, the typewriter has the carriage mid-return on an unfinished line.
+You walk in through a black title card. A 1974 cutting room fills the frame on a slight diorama tilt, the projector humming at floor level. No HUD. No chrome. The room is paused — the coffee is cold, the reels are still, the typewriter has the carriage mid-return on an unfinished line.
 
 1. You click anything in the frame.
 2. A lens-focus ring settles over the object. Florence-2 mapped it.
@@ -35,7 +35,7 @@ You do not watch a trailer. You click the desk that made it.
 
 ## Live architecture
 
-With `FAL_KEY` set: real Florence-2 detection on `fal-ai/florence-2-large/open-vocabulary-detection`. LLM-authored A2UI slates via fal's OpenRouter OpenAI-compatible proxy (`google/gemini-2.5-flash` by default). LTX-2.3 quality extend-video from the last ~2s of captured mp4. Veo 3.1 image-to-video reserved exclusively for the `summon_operator` hero beat (Imogen returns).
+With `FAL_KEY` set: real Florence-2 detection on `fal-ai/florence-2-large/open-vocabulary-detection`. LLM-authored A2UI slates via fal's OpenRouter OpenAI-compatible proxy (`google/gemini-2.5-flash` by default). LTX-2.3 quality extend-video seeded from `public/canvas/room_seed.mp4` (true video→video continuation). Veo 3.1 image-to-video reserved exclusively for the `summon_operator` hero beat (Imogen returns).
 
 ---
 
@@ -46,8 +46,8 @@ A single `FAL_KEY` opens the cutting room.
 | Capability | Endpoint | See it |
 |------------|----------|-------|
 | Zero-shot detection | `fal-ai/florence-2-large/open-vocabulary-detection` | Click anything in the frame — Florence sends absolute-pixel bboxes + the server normalizes via `image.width/height` to the cutting-room seven-object map. |
-| Video continuation | `fal-ai/ltx-2.3-quality/extend-video` | Your captured ~2s mp4 gets uploaded to `fal.storage.upload`, then extended forward. Every editing branch except summon_operator flows through this. |
-| Hero moment | `fal-ai/veo3.1/image-to-video` | The `summon_operator` action — a JPEG of the current frame seeds 8s of cinematic character dialogue at 16:9. Fires exactly once per demo. |
+| Video continuation | `fal-ai/ltx-2.3-quality/extend-video` | Server uploads `room_seed.mp4` (or the warmed fal.storage URL) and extends forward. Every editing branch except summon_operator flows through this. |
+| Hero moment | `fal-ai/veo3.1/image-to-video` | The `summon_operator` action — a JPEG still of the current frame seeds 8s of cinematic character dialogue at 16:9. Fires exactly once per demo. |
 | LLM | `https://fal.run/openrouter/router/openai/v1` | Two-step: (1) author a Zod-validated A2UI slate JSON for the clicked object in the register of a film-desk annotation, (2) rewrite the extend-video prompt so the next clip visibly reflects your edit. Falls back to the deterministic `SURFACE_CATALOG` in `orchestrator.ts` on any failure. |
 
 ### fal session logs
@@ -87,7 +87,7 @@ Generated chain mp4s under `public/canvas/demo/` (and `demo/chain/`) stay gitign
 ```
 src/
 ├─ app/
-│  ├─ page.tsx                       # Mounts the sphere, reticle, & slate strip
+│  ├─ page.tsx                       # Mounts diorama, reticle, & slate strip
 │  └─ api/canvas/
 │     ├─ orchestrate/route.ts        # Florence-2 + LLM slate
 │     ├─ generate/route.ts           # multipart (mp4+jpg) → extend-video or Veo hero
@@ -135,6 +135,7 @@ Add `FAL_KEY` to `.env`, then open `http://localhost:3000`.
 |----------|----------|---------|---------|
 | `FAL_KEY` | for LIVE | — | Unlocks all fal.ai endpoints + the LLM proxy. |
 | `FAL_LLM_MODEL` | no | `google/gemini-2.5-flash` | Any model served by the fal OpenRouter proxy. |
+| `FAL_CHEAP` | no | unset | Credit saver — mock detect, short LTX, skip Veo/rewrite. Keep off for pitch. |
 | `DATABASE_URL` | scaffold | `file:./dev.db` | Required by scaffold's Prisma; the canvas doesn't touch it. |
 
 ---
@@ -142,10 +143,11 @@ Add `FAL_KEY` to `.env`, then open `http://localhost:3000`.
 ## Notes
 
 - **Coordinate normalization lives on the server.** Florence-2 returns absolute-pixel bboxes + the processed `image.width/height`; the server normalizes so the client never guesses capture dimensions.
-- **A real mp4 seeds extend-video.** The client captures ~2s via `MediaRecorder`, uploads the blob to `fal.storage`, and the server hands the hosted URL to extend-video — true video-to-video branching.
-- **Graceful degradation everywhere.** LLM Zod failure → catalog slate. Empty video URL → demo branch mp4. No `FAL_KEY` → entire pipeline mocked but the spherical projection, drone, and interactive gesture all stay live.
+- **LTX seeds from `room_seed.mp4`.** The server uploads the baked ambient seed to `fal.storage` and extends it — true video-to-video branching without relying on short MediaRecorder captures.
+- **Graceful degradation everywhere.** LLM Zod failure → catalog slate. Empty video URL → `room_loop.mp4`. Florence failure → mock cutting-room hotspots so clicks still open a slate.
 - **Veo 3.1 fires exactly once per demo.** Restrained by design — reserve the most expensive shot for the most emotional beat.
-- The spherical parallax tilts ±4°/±16px on cursor drift. The ambient drone runs at 41 Hz with an 87 Hz harmonic, fading in over 1.2s; the projector never stops until the tab closes.
+- **Known limitation (frame capture after remote cuts).** `FilmGate` prefers CORS-fetch → `blob:` rehost so canvas capture stays clean. If fal CDN blocks that fetch, playback still works but `drawImage` can taint; Florence then falls back to mocks and Veo may lack a fresh still. We have not treated this as a live refactor target — LTX clicks stay reliable via `room_seed`; prefer summon early or after a clean ambient frame if you notice it.
+- The diorama tilts slightly with cursor drift. The ambient drone runs at 41 Hz with an 87 Hz harmonic; the projector never stops until the tab closes.
 
 ---
 
