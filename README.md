@@ -1,6 +1,6 @@
 # The Turing-Complete Canvas
 
-*A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. You don't watch it — you finish it.*
+*A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. Your job is to finish it.*
 
 One streaming hallucination, one agent, one continuation model. The film stock is the file system.
 
