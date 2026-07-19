@@ -1,6 +1,6 @@
 # The Turing-Complete Canvas
 
-*A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. You don't watch it — you finish it.*
+*A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. You don't watch it - you finish it.*
 
 One streaming hallucination, one agent, one continuation model. The film stock is the file system.
 
@@ -55,17 +55,13 @@ See `STORYLINE.md` for the full narrative: logline, characters, branch narrative
 
 ## Demo assets (`public/canvas/`)
 
-The current clips are placeholders. To ship a real demo, replace them in-place with licensed stock or generated footage matching these spec slots:
-
-| File | Used as | Spec |
-|------|---------|------|
-| `scene_main.mp4` | boot / null hypothesis / `taking` | 6s · 1280x720 · 24fps · the cutting room wide, paused, ambient hum |
-| `branch_neutral.mp4` | `neutral`, `cut_take`, `continue_page`, `sign_off`, `rewind`, `advance_clock`, `scratch_line`, `cold_grade` | 6s · any 16mm-graded gentle-motion continuation |
-| `branch_alert.mp4` | `roll_take`, `burn`, `warm_grade`, `page_studio`, `extend_establish` | 6s · slightly more active beat (reels turning, light leaking, the door visible stage-left) |
-| `branch_reboot.mp4` | `splice`, `recover`, `bleach_grade`, `summon_operator` (demo stand-in for Veo) | 6s · the closest we have to an emotional curve; should read as "the room acknowledges the edit" |
-| `poster.jpg` | intro poster image | 1280x720 · 16mm-graded wide of the cutting room |
-
-For an even stronger demo, replace the four mp4s above with five to seven short discrete cuts (one per branch family) and extend `DEMO_BRANCH_URLS` in `src/lib/canvas/store.ts` and `src/app/api/canvas/generate/route.ts` to point each branch id at its own clip.
+| File | Used as | Tracked? |
+|------|---------|----------|
+| `room_loop.mp4` / `room_seed.mp4` | ambient boot + LTX seed | yes |
+| `intro.mp4` / `poster.jpg` | title / poster | yes |
+| `voices/*.mp3` | pre-baked ghost VO stems | yes |
+| `demo/session-log.jsonl` | fal usage audit (prompts, URLs, timings) | yes |
+| `demo/*.mp4`, `demo/chain/` | generated pitch-reel / chain clips | **no** (gitignored — local only) |
 
 ---
 
@@ -133,3 +129,11 @@ Without `FAL_KEY`, the app boots straight into DEMO mode and the full interactio
 - **Graceful degradation everywhere.** LLM Zod failure → catalog slate. Empty video URL → demo branch mp4. No `FAL_KEY` → entire pipeline mocked but the spherical projection, drone, and interactive gesture all stay live.
 - **Veo 3.1 fires exactly once per demo.** Restrained by design — reserve the most expensive shot for the most emotional beat. Demo mode reuses the splice clip so the curve still survives offline.
 - The spherical parallax tilts ±4°/±16px on cursor drift. The ambient drone runs at 41 Hz with an 87 Hz harmonic, fading in over 1.2s; the projector never stops until the tab closes.
+- **fal usage session log.** Batch generation / pitch-reel fal calls append to `public/canvas/demo/session-log.jsonl` (prompts, fal URLs, timings, success/fail). That log is tracked in git for audit / submission packs. Generated chain mp4s under `public/canvas/demo/` (and `demo/chain/`) are gitignored — regenerate locally with `bun run gen:demo`.
+
+---
+
+## Future work
+
+- **Scene-tied TTS / VO.** Generate or stream voice lines as each scene/branch lands (not only pre-baked ElevenLabs stems), so new LTX/Veo continuations get matching ghost VO without a separate recording pass.
+- **Dispatch agents.** Spin up verification agents that walk the click → detect → slate → generate loop end-to-end (and smoke-check fal endpoints / fallbacks) so regressions surface before a live pitch.

@@ -52,3 +52,11 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# Generated fal chain / pitch-reel clips — keep local only (session logs stay tracked)
+public/canvas/demo/**/*.mp4
+public/canvas/demo/chain/
+!public/canvas/demo/session-log.jsonl
+
+# Local lint dump
+lintout.txt
