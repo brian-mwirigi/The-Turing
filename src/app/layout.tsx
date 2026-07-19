@@ -1,29 +1,33 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Instrument_Serif, Syne } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const filmSerif = Instrument_Serif({
+  variable: "--font-film",
   subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const studioSans = Syne({
+  variable: "--font-studio",
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
 });
 
 export const metadata: Metadata = {
-  title: "Turing-Complete Canvas · fal × Sequoia Dev Track",
+  title: "The Turing-Complete Canvas · a film you finish by clicking",
   description:
-    "A generative video stream that behaves like a software interface. Click any object to spawn contextual control panels and branch the narrative in real time.",
+    "A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. You don't watch it — you finish it. An interactive generative video wrapped in an agent-to-user interface: click anything in the film and rewrite the cut.",
   keywords: [
     "fal.ai",
     "LTX-2.3",
     "Florence-2",
+    "Veo 3.1",
     "A2UI",
     "generative video",
-    "interactive video",
+    "interactive film",
     "spatial computing",
     "Sequoia",
     "hackathon",
@@ -39,7 +43,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning className="dark">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+        className={`${filmSerif.variable} ${studioSans.variable} antialiased`}
         style={{ background: "#000", color: "#e2e8f0" }}
       >
         {children}

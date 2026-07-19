@@ -1,42 +1,92 @@
 {
+  "scene": {
+    "id": "cutting_room_7",
+    "title": "Cutting Room 7",
+    "logline": "A filmmaker died mid-edit of her only film. Her cutting room was left as it was. You finish it.",
+    "base_prompt": "16mm cutting room, 1974, long vertical light shaft from a high window, dust drifting slowly through the beam, a Steenbeck flatbed film editor on a wooden desk, sleeves of 16mm film hanging from the ceiling, a Royal typewriter with a half-finished page, a cold mug of coffee, a green-illuminated wall intercom, a Bolex on a tripod in the corner with the lens cap off, window onto a grey Pacific coast, everything paused and waiting, cinematic, 24fps, organic grain, anamorphic flare, no people, ambient hum"
+  },
   "objects": {
-    "server_rack_sparking": {
-      "label": "Server Rack 7-A",
+    "steenbeck_reels": {
+      "label": "Steenbeck Flatbed",
       "bbox": [
-        0.18,
-        0.2,
+        0.06,
         0.42,
-        0.85
+        0.46,
+        0.86
       ],
-      "semantic_role": "faulty_asset",
-      "description": "Sparking server rack with failing power supply"
+      "semantic_role": "film_source",
+      "description": "16mm flatbed film editor with two reels and a splice block."
     },
-    "control_terminal": {
-      "label": "Control Terminal",
+    "bolex_tripod": {
+      "label": "Bolex on Tripod",
       "bbox": [
-        0.55,
+        0.62,
+        0.18,
+        0.86,
+        0.72
+      ],
+      "semantic_role": "camera_asset",
+      "description": "A Bolex H16 on a tripod, lens cap off, pointed across the room."
+    },
+    "typewriter_note": {
+      "label": "Royal Typewriter",
+      "bbox": [
+        0.4,
         0.3,
-        0.92,
+        0.66,
+        0.62
+      ],
+      "semantic_role": "manuscript",
+      "description": "A Royal typewriter. The carriage is mid-return on an unfinished line."
+    },
+    "cold_coffee": {
+      "label": "Cold Coffee",
+      "bbox": [
+        0.5,
+        0.66,
+        0.6,
         0.78
       ],
-      "semantic_role": "operator_interface",
-      "description": "Main control terminal displaying system status"
+      "semantic_role": "artifact_unset",
+      "description": "A mug of coffee gone cold. No steam. The ring stain under it says three days."
     },
-    "cooling_vent": {
-      "label": "Cooling Vent",
+    "wall_intercom": {
+      "label": "Wall Intercom",
       "bbox": [
-        0.44,
-        0.05,
-        0.62,
-        0.18
+        0.84,
+        0.08,
+        0.97,
+        0.3
       ],
-      "semantic_role": "hvac_component",
-      "description": "Overhead cooling vent with temperature readings"
+      "semantic_role": "operator_interface",
+      "description": "A green-illuminated wall intercom. The only thing in the room that still answers."
+    },
+    "light_shaft": {
+      "label": "Light Shaft",
+      "bbox": [
+        0.2,
+        0.04,
+        0.4,
+        0.4
+      ],
+      "semantic_role": "vfx_element",
+      "description": "A long vertical shaft of afternoon light from a high window. The room's grade."
+    },
+    "window_ocean": {
+      "label": "Window, Pacific",
+      "bbox": [
+        0.86,
+        0.32,
+        1.0,
+        0.66
+      ],
+      "semantic_role": "scene_extern",
+      "description": "A tall narrow window onto a grey Pacific coast."
     }
   },
   "video_dimensions": {
     "width": 1280,
     "height": 720,
-    "fps": 30
+    "fps": 24
   }
 }

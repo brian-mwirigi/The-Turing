@@ -24,10 +24,18 @@ import {
   extendVideo,
   generateVeoHero,
   isLiveMode,
-  uploadVideoBlob,
+  resolveExtendSeed,
+  skipPromptRewrite,
+  skipVeo,
 } from "@/lib/canvas/fal-client";
 import { planBranchForAction } from "@/lib/canvas/orchestrator";
+import {
+  assembleExtendPrompt,
+  LTX_NEGATIVE_PROMPT,
+  VEO_NEGATIVE_PROMPT,
+} from "@/lib/canvas/extend-prompts";
 import { rewriteExtendPrompt } from "@/lib/canvas/llm-orchestrator";
+import { DEMO_BRANCH_URLS } from "@/lib/canvas/store";
 import type {
   BranchId,
   GenerateResponse,
@@ -38,30 +46,12 @@ import type {
 export const runtime = "nodejs";
 export const maxDuration = 300; // Veo 3.1 / LTX-2.3 can take a few minutes
 
-const DEMO_BRANCH_URLS: Record<BranchId, string> = {
-  main: "/canvas/scene_main.mp4",
-  alert: "/canvas/branch_alert.mp4",
-  reboot: "/canvas/branch_reboot.mp4",
-  neutral: "/canvas/branch_neutral.mp4",
-  veo31: "/canvas/branch_reboot.mp4", // procedural stand-in
-};
-
-const BASE_PROMPT =
-  "Cinematic sci-fi server room interior, dark ambiance with cyan accent lighting, " +
-  "server racks with blinking LEDs, perspective floor grid, volumetric dust particles, " +
-  "film grain, 35mm anamorphic lens, high detail";
-
-const VEO_HERO_BASE_PROMPT =
-  "Cinematic sci-fi hero shot of a server room operator responding to a critical fault. " +
-  "A uniformed operator enters frame with commanding urgency, emergency red lighting pulses across the room, " +
-  "ambient LEDs strobe, volumetric dust, 35mm anamorphic, shallow depth of field, dramatic push-in, film grain. ";
-
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
     const actionJson = form.get("action");
-    const currentBranch = (form.get("currentBranch") as string | null) ?? "main";
-    const sceneId = (form.get("sceneId") as string | null) ?? "main";
+    const currentBranch = (form.get("currentBranch") as string | null) ?? "taking";
+    const sceneId = (form.get("sceneId") as string | null) ?? "cutting_room_7";
     const lastFrame = (form.get("lastFrame") as string | null) ?? undefined;
     const lastFrameVideo = form.get("lastFrameVideo") as File | null;
 
@@ -84,7 +74,8 @@ export async function POST(req: NextRequest) {
     let branch: BranchId;
     let promptSuffix: string;
     let rewriteOk = false;
-    if (isLiveMode()) {
+    // FAL_CHEAP / FAL_SKIP_LLM → skip rewrite LLM (saves ~1–3s + tokens)
+    if (isLiveMode() && !skipPromptRewrite()) {
       const r = await rewriteExtendPrompt({ action, currentBranch });
       if (r.ok && r.branch && r.promptSuffix) {
         branch = r.branch;
@@ -101,10 +92,14 @@ export async function POST(req: NextRequest) {
       promptSuffix = fb.promptSuffix;
     }
 
-    const isHero = branch === "veo31" || action.actionId === "summon_operator";
-    const updatedPrompt = isHero
-      ? `${VEO_HERO_BASE_PROMPT}${promptSuffix.startsWith(" —") ? promptSuffix : " — " + promptSuffix}`
-      : `${BASE_PROMPT}${promptSuffix}`;
+    const isHero = branch === "summon_operator" || action.actionId === "summon_operator";
+    // [action] + [cine base] + [lock] — or full cutaway/hero string.
+    const beat = promptSuffix.replace(/^[\s—-]+/, "").trim();
+    const updatedPrompt = assembleExtendPrompt(
+      beat,
+      isHero ? "summon_operator" : branch,
+      action.actionId,
+    );
 
     // ----------------------------------------------------------------
     // DEMO MODE: return the pre-rendered procedural asset
@@ -139,73 +134,81 @@ export async function POST(req: NextRequest) {
 
     // ----------------------------------------------------------------
     // LIVE MODE — Veo 3.1 hero
+    // Gate is strict: skipVeo() (FAL_CHEAP / FAL_SKIP_VEO) → never call Veo.
+    // Fall through to LTX extend below. No alternate/cheap Veo model id.
     // ----------------------------------------------------------------
     if (isHero) {
-      if (!lastFrame) {
-        return NextResponse.json({ error: "lastFrame is required for Veo hero" }, { status: 400 });
-      }
-      const r = await generateVeoHero({
-        imageUrl: lastFrame,
-        prompt: updatedPrompt,
-        duration: "8s",
-        aspectRatio: "16:9",
-        resolution: "720p",
-        generateAudio: true,
-      });
-      if (r.url) {
+      if (skipVeo()) {
+        console.log(
+          "[generate] summon_operator → LTX path (Veo skipped: FAL_CHEAP / FAL_SKIP_VEO)",
+        );
+      } else {
+        if (!lastFrame) {
+          return NextResponse.json(
+            { error: "lastFrame is required for Veo hero" },
+            { status: 400 },
+          );
+        }
+        const r = await generateVeoHero({
+          imageUrl: lastFrame,
+          prompt: updatedPrompt,
+          negativePrompt: VEO_NEGATIVE_PROMPT,
+          duration: "8s",
+          aspectRatio: "16:9",
+          resolution: "1080p",
+          generateAudio: true,
+          useFast: false,
+        });
+        if (r.url) {
+          return NextResponse.json({
+            chunk: {
+              id: `chunk_veo_${Date.now()}`,
+              url: r.url,
+              source: "veo31" as VideoSource,
+              prompt: r.prompt,
+              branch,
+              durationSec: r.durationSec,
+              queuedAt: Date.now(),
+            },
+            branch,
+            updatedPrompt,
+            rewriteOk,
+            live: true,
+            timings: {
+              queueMs: 0,
+              generationMs: Date.now() - t0,
+              totalMs: Date.now() - t0,
+            },
+          } satisfies GenerateResponse & { rewriteOk: boolean; live: boolean });
+        }
+        // Veo returned empty — fall back to demo clip for this branch
         return NextResponse.json({
           chunk: {
-            id: `chunk_veo_${Date.now()}`,
-            url: r.url,
-            source: "veo31" as VideoSource,
-            prompt: r.prompt,
+            id: `chunk_fb_${Date.now()}`,
+            url: DEMO_BRANCH_URLS[branch],
+            source: "demo",
+            prompt: updatedPrompt,
             branch,
-            durationSec: r.durationSec,
+            durationSec: 6,
             queuedAt: Date.now(),
           },
           branch,
           updatedPrompt,
           rewriteOk,
-          live: true,
-          timings: {
-            queueMs: 0,
-            generationMs: Date.now() - t0,
-            totalMs: Date.now() - t0,
-          },
-        } satisfies GenerateResponse & { rewriteOk: boolean; live: boolean });
+          live: false,
+          fallback: true,
+          timings: { queueMs: 0, generationMs: Date.now() - t0, totalMs: Date.now() - t0 },
+        });
       }
-      // Veo returned empty — fall back to demo clip for this branch
-      return NextResponse.json({
-        chunk: {
-          id: `chunk_fb_${Date.now()}`,
-          url: DEMO_BRANCH_URLS[branch],
-          source: "demo",
-          prompt: updatedPrompt,
-          branch,
-          durationSec: 6,
-          queuedAt: Date.now(),
-        },
-        branch,
-        updatedPrompt,
-        rewriteOk,
-        live: false,
-        fallback: true,
-        timings: { queueMs: 0, generationMs: Date.now() - t0, totalMs: Date.now() - t0 },
-      });
     }
 
     // ----------------------------------------------------------------
-    // LIVE MODE — LTX-2.3 extend-video (true video → video)
+    // LIVE MODE — LTX extend-video (also used when Veo is skipped)
+    // Seed: real MP4 capture when available; else room_loop.mp4 (Chrome
+    // MediaRecorder usually emits WebM, which LTX rejects with 422).
     // ----------------------------------------------------------------
-    if (!lastFrameVideo) {
-      return NextResponse.json(
-        { error: "lastFrameVideo (mp4 blob) is required for live extend-video" },
-        { status: 400 }
-      );
-    }
-    const videoUrl = await uploadVideoBlob(lastFrameVideo);
+    const videoUrl = await resolveExtendSeed(lastFrameVideo);
     if (!videoUrl) {
-      // Storage upload failed — fall back to demo clip
       return NextResponse.json({
         chunk: {
           id: `chunk_fb_${Date.now()}`,
@@ -226,7 +229,16 @@ export async function POST(req: NextRequest) {
     }
 
     const tUpload = Date.now();
-    const result = await extendVideo({ videoUrl, prompt: updatedPrompt });
+    const isCutaway = branch === "extend_establish";
+    const result = await extendVideo({
+      videoUrl,
+      prompt: updatedPrompt,
+      videoStrength: isCutaway ? 0.7 : 0.8,
+      enablePromptExpansion: isCutaway,
+      negativePrompt: isCutaway
+        ? "desk, Steenbeck, typewriter, interior, room, fog blobs"
+        : LTX_NEGATIVE_PROMPT,
+    });
     if (!result.url) {
       return NextResponse.json({
         chunk: {
@@ -273,9 +285,23 @@ export async function POST(req: NextRequest) {
     } satisfies GenerateResponse & { rewriteOk: boolean; live: boolean });
   } catch (err) {
     console.error("[generate] error:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "unknown error" },
-      { status: 500 }
-    );
+    // Never hard-fail the UI mid-demo — fall back to the ambient loop.
+    return NextResponse.json({
+      chunk: {
+        id: `chunk_fb_${Date.now()}`,
+        url: DEMO_BRANCH_URLS.taking,
+        source: "demo",
+        prompt: "fallback after generate error",
+        branch: "taking",
+        durationSec: 6,
+        queuedAt: Date.now(),
+      },
+      branch: "taking",
+      updatedPrompt: "fallback after generate error",
+      live: false,
+      fallback: true,
+      error: err instanceof Error ? err.message : "unknown error",
+      timings: { queueMs: 0, generationMs: 0, totalMs: Date.now() },
+    });
   }
 }

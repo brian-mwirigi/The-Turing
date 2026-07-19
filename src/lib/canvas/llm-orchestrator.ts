@@ -87,11 +87,13 @@ export const SurfaceSchema = z.object({
     y2: z.number().min(0).max(1),
   }),
   semanticRole: z.enum([
-    "faulty_asset",
+    "film_source",
+    "camera_asset",
+    "manuscript",
+    "artifact_unset",
     "operator_interface",
-    "hvac_component",
-    "security_node",
-    "data_stream",
+    "vfx_element",
+    "scene_extern",
     "unknown",
   ]),
   root: ComponentSchema,
@@ -99,41 +101,133 @@ export const SurfaceSchema = z.object({
 });
 
 const RewriteSchema = z.object({
-  branch: z.enum(["main", "alert", "reboot", "neutral", "veo31"]),
+  branch: z.enum([
+    "taking",
+    "splice",
+    "roll_take",
+    "cut_take",
+    "continue_page",
+    "scratch_line",
+    "sign_off",
+    "warm_grade",
+    "cold_grade",
+    "bleach_grade",
+    "page_studio",
+    "summon_operator",
+    "recover",
+    "burn",
+    "rewind",
+    "advance_clock",
+    "extend_establish",
+    "cutto_interior",
+    "neutral",
+  ]),
   promptSuffix: z.string().min(1).max(400),
 });
+
+// ============================================================================
+// Canonical actionId allowlist — buttons/options MUST resolve to one of
+// these. The system prompt already asks the LLM for this, but nothing
+// enforced it; an off-list actionId would break planBranchForAction /
+// generate mapping. Reject the surface so orchestrate falls back to catalog.
+// ============================================================================
+
+const CANONICAL_ACTION_IDS = new Set([
+  "splice",
+  "recover",
+  "burn",
+  "roll_take",
+  "cut_take",
+  "reframe",
+  "continue_page",
+  "scratch_line",
+  "sign_off",
+  "advance_clock",
+  "rewind",
+  "warm_grade",
+  "cold_grade",
+  "bleach_grade",
+  "page_studio",
+  "summon_operator",
+  "extend_establish",
+  "cutto_interior",
+  "inspect",
+]);
+
+/** Recursively collect any button/select-option actionId not on the allowlist. */
+function collectInvalidActionIds(node: A2UIComponent): string[] {
+  const bad: string[] = [];
+  const props = node.props as Record<string, unknown> | undefined;
+  if (node.type === "button") {
+    const actionId = props?.actionId;
+    if (typeof actionId !== "string" || !CANONICAL_ACTION_IDS.has(actionId)) {
+      bad.push(String(actionId));
+    }
+  }
+  if (node.type === "select") {
+    const options = (props?.options as Array<{ actionId?: unknown }> | undefined) ?? [];
+    for (const opt of options) {
+      if (typeof opt.actionId !== "string" || !CANONICAL_ACTION_IDS.has(opt.actionId)) {
+        bad.push(String(opt.actionId));
+      }
+    }
+  }
+  for (const child of node.children ?? []) bad.push(...collectInvalidActionIds(child));
+  return bad;
+}
 
 // ============================================================================
 // STEP 1 — A2UI surface generation
 // ============================================================================
 
-const SURFACE_SYSTEM = `You are an A2UI surface authoring agent. You emit declarative JSON describing a control panel to render on top of a video frame.
+const SURFACE_SYSTEM = `You are an A2UI surface authoring agent inside a film. The scene is "The Turing-Complete Canvas" — a 1970s cutting room left exactly as the late filmmaker Imogen Veyra left it. The user is the inheritor finishing her uncut film.
+
+You emit declarative JSON describing a control panel rendered on top of the film frame. The panel is not software chrome: it is a film-desk slate. Voice it like a focus-puller's annotation. Quiet. Precise. Never break the cinematic register. Never say "system", "alert", "facility", "operator", "server". This is a cutting room, not a server room.
 
 The schema supports these component types and their props:
 - panel   : container; children = list of components
-- header  : props.text = uppercase header string
-- text    : props.content
-- metric  : props.label, props.value, props.status ∈ {ok,warn,crit}
-- button  : props.label, props.actionId, props.variant ∈ {primary,danger,ghost}
+- header  : props.text = uppercase header string, format "<Label> // <DESK>"
+- text    : props.content — short, evocative, at most two lines
+- metric  : props.label (descriptive, lowercase), props.value (string), props.status in {ok,warn,crit}
+- button  : props.label (an action verb in the filmmaker's voice), props.actionId (snake_case), props.variant in {primary,danger,ghost}
 - toggle  : props.label, props.defaultOn (boolean)
-- alert   : props.level ∈ {info,warn,crit}, props.message
+- select  : props.label, props.options = [{label, actionId}, ...]
+- alert   : props.level in {info,warn,crit}, props.message — write as a line of stage direction, never a system log
 - divider : no props
 - code    : props.content (multiline)
 
 Output a single JSON object with fields:
-  anchor      : { x1, y1, x2, y2 } normalized 0..1 in video frame coordinates
-  semanticRole : one of faulty_asset | operator_interface | hvac_component | security_node | data_stream | unknown
+  anchor      : { x1, y1, x2, y2 } normalized 0..1 in video frame coordinates — equal to the object's bbox
+  semanticRole : one of film_source | camera_asset | manuscript | artifact_unset | operator_interface | vfx_element | scene_extern | unknown
   root         : the panel component tree (root.type is typically "panel")
-  reason       : one-sentence rationale
+  reason       : one-sentence rationale, written like a film editor's slate note
 
 Hard constraints:
 - Only emit JSON, no explanations, no markdown fences.
-- actionIds must be lowercase snake_case; for the branching story use these canonical ids when relevant: trigger_alert, reboot, isolate, lockdown, continue, standby, lower_temp, boost_fan, review_logs, export_snapshot, inspect, summon_operator.
-- The panel is anchored to the right of the bbox by the renderer, so anchor must equal the object's bbox.`;
+- actionIds must be lowercase snake_case. Use these canonical ids when relevant to the branching story: splice, recover, burn, roll_take, cut_take, reframe, continue_page, scratch_line, sign_off, advance_clock, rewind, warm_grade, cold_grade, bleach_grade, page_studio, summon_operator, extend_establish, cutto_interior, inspect.
+- ALWAYS include a button with actionId "summon_operator", label "Summon the operator", variant "danger" on EVERY panel (every object). The server also injects it if missing — still emit it yourself.
+- The panel is anchored to the right of the bbox by the renderer, so anchor must equal the object's bbox.
+- Maximum three buttons per panel (including summon_operator). Maximum four metrics. Restraint lands the beat.
+
+CURRENT BRANCH + OBJECT STATE (critical):
+- The user payload includes currentBranch AND objectState (for the clicked role) AND objectStates (all roles).
+- objectState is the narrative tag for THIS object after prior commits (e.g. "leader_burnt — join lost").
+- Metrics, copy, and buttons MUST reflect objectState + currentBranch. Do NOT offer the same primary action that already happened.
+  Examples:
+  - objectState contains reels_running / splice → offer burn/recover/hold — NOT "splice for the first time".
+  - objectState contains leader_burnt → offer recover/rejoin — NOT the idle splice menu.
+  - objectState contains take_rolling → emphasize cut_take / reframe.
+  - objectState contains grade_warm → offer cold/bleach or hold — not "warm" as if unset.
+  - objectState empty / "paused" + currentBranch taking|neutral → first-touch actions for that object.
+- Header/metrics should read as a status report of the present beat ("REELS RUNNING", "LEADER BURNT", etc.).`;
 
 export interface SurfaceGenInput {
   object: DetectedObject;
   branch: string;
+  /** Narrative tag for the clicked object's role (from store.objectStates). */
+  objectState?: string;
+  /** Full per-role state map for scene continuity. */
+  objectStates?: Record<string, string>;
 }
 export interface SurfaceGenResult {
   ok: boolean;
@@ -145,14 +239,23 @@ export async function generateSurface(inp: SurfaceGenInput): Promise<SurfaceGenR
   const c = client();
   if (!c) return { ok: false, error: "no FAL_KEY" };
   try {
+    const role = inp.object.semanticRole ?? "unknown";
+    const objectState =
+      inp.objectState ??
+      inp.objectStates?.[role] ??
+      "paused — no prior action on this object";
     const user = JSON.stringify({
       object: {
         label: inp.object.label,
-        semanticRole: inp.object.semanticRole ?? "unknown",
+        semanticRole: role,
         confidence: inp.object.confidence,
         bbox: inp.object.bbox,
       },
       currentBranch: inp.branch,
+      objectState,
+      objectStates: inp.objectStates ?? {},
+      instruction:
+        "Author the slate for THIS object's current state. Buttons and metrics must match objectState — not the idle starting menu.",
     });
     const completion = await c.chat.completions.create({
       model: DEFAULT_LLM_MODEL,
@@ -171,6 +274,13 @@ export async function generateSurface(inp: SurfaceGenInput): Promise<SurfaceGenR
     if (!validated.success) {
       return { ok: false, error: validated.error.issues[0]?.message ?? "schema fail" };
     }
+    const invalidActionIds = collectInvalidActionIds(validated.data.root);
+    if (invalidActionIds.length > 0) {
+      return {
+        ok: false,
+        error: `invalid actionId(s) from LLM: ${invalidActionIds.join(", ")}`,
+      };
+    }
     return { ok: true, surface: validated.data };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "llm error" };
@@ -181,17 +291,21 @@ export async function generateSurface(inp: SurfaceGenInput): Promise<SurfaceGenR
 // STEP 2 — extend-video prompt rewrite (state persistence)
 // ============================================================================
 
-const REWRITE_SYSTEM = `You are a cinematic video-prompt rewriter for an LTX-2.3 video extension model.
+const REWRITE_SYSTEM = `You are a cinematic video-prompt rewriter for an LTX-2.3 video extension model. The film is "The Turing-Complete Canvas" — a 1970s cutting room left mid-edit by a filmmaker who died before picture lock.
 
-Given a user action taken in a sci-fi server-room control panel, emit a short continuation cue that will be appended to the scene's base prompt. The cue must describe visible motion/camera/lighting changes that the video model can render in ~1 second of new content.
+Given a user action, emit a continuation cue in this exact shape:
+MOVES: <only the parts that change>. DOES NOT MOVE: <camera/framing and every prop that stays>.
 
 Rules:
-- Output JSON only.
-- Keep promptSuffix under 60 words. No markdown.
-- branch must be one of: main | alert | reboot | neutral | veo31.
-  - veo31 triggers Veo 3.1 (only valid for the summon_operator action).
-- For summon_operator, set branch=veo31 and describe an operator arriving / a dramatic hero beat.
-- Be cinematic, precise, action-oriented.`;
+- Output JSON only. No markdown.
+- Keep promptSuffix under 60 words. No ellipsis. No soft ambient trailing.
+- Always ban: zoom, push-in, dolly, thick fog/steam blobs, restaging the room.
+- Exception: reframe may pan the Bolex tripod head only; camera body stays fixed.
+- Exception: extend_establish is a HARD CUT to outdoor Pacific (no interior props).
+- Server appends camera/set lock — do not write a long layout essay.
+- branch must be one of: taking | splice | roll_take | cut_take | continue_page | scratch_line | sign_off | warm_grade | cold_grade | bleach_grade | page_studio | summon_operator | recover | burn | rewind | advance_clock | extend_establish | cutto_interior | neutral.
+- summon_operator is the ONLY branch that may introduce a person (Veo). Keep the room layout.
+- Never redesign the set. Never invent lamps, green walls, or new furniture.`;
 
 export interface RewriteInput {
   action: UserAction;
@@ -200,7 +314,26 @@ export interface RewriteInput {
 }
 export interface RewriteResult {
   ok: boolean;
-  branch?: "main" | "alert" | "reboot" | "neutral" | "veo31";
+  branch?:
+    | "taking"
+    | "splice"
+    | "roll_take"
+    | "cut_take"
+    | "continue_page"
+    | "scratch_line"
+    | "sign_off"
+    | "warm_grade"
+    | "cold_grade"
+    | "bleach_grade"
+    | "page_studio"
+    | "summon_operator"
+    | "recover"
+    | "burn"
+    | "rewind"
+    | "advance_clock"
+    | "extend_establish"
+    | "cutto_interior"
+    | "neutral";
   promptSuffix?: string;
   error?: string;
 }
@@ -265,11 +398,13 @@ function safeJson(s: string): unknown | null {
 
 export function roleFromStringSafe(role: string | undefined): SemanticRole {
   const valid: SemanticRole[] = [
-    "faulty_asset",
+    "film_source",
+    "camera_asset",
+    "manuscript",
+    "artifact_unset",
     "operator_interface",
-    "hvac_component",
-    "security_node",
-    "data_stream",
+    "vfx_element",
+    "scene_extern",
     "unknown",
   ];
   return (valid as string[]).includes(role ?? "") ? (role as SemanticRole) : "unknown";

@@ -36,11 +36,13 @@ export interface DetectedObject {
 }
 
 export type SemanticRole =
-  | "faulty_asset"
+  | "film_source"
+  | "camera_asset"
+  | "manuscript"
+  | "artifact_unset"
   | "operator_interface"
-  | "hvac_component"
-  | "security_node"
-  | "data_stream"
+  | "vfx_element"
+  | "scene_extern"
   | "unknown";
 
 // ============================================================================
@@ -102,7 +104,7 @@ export type A2UIOperation =
 export interface UserAction {
   /** Semantic role of the surface that triggered the action. */
   semanticRole: SemanticRole;
-  /** The action identifier selected in the UI (e.g. "trigger_alert", "reboot", "summon_operator"). */
+  /** The action identifier selected in the UI (e.g. "splice", "roll_take", "summon_operator"). */
   actionId: string;
   /** Human-readable label. */
   label: string;
@@ -116,7 +118,26 @@ export interface UserAction {
 // Video generation
 // ============================================================================
 
-export type BranchId = "main" | "alert" | "reboot" | "neutral" | "veo31";
+export type BranchId =
+  | "taking"
+  | "splice"
+  | "roll_take"
+  | "cut_take"
+  | "continue_page"
+  | "scratch_line"
+  | "sign_off"
+  | "warm_grade"
+  | "cold_grade"
+  | "bleach_grade"
+  | "page_studio"
+  | "summon_operator"
+  | "recover"
+  | "burn"
+  | "rewind"
+  | "advance_clock"
+  | "extend_establish"
+  | "cutto_interior"
+  | "neutral";
 
 export type VideoSource = "ltx23" | "veo31" | "demo";
 
@@ -133,6 +154,21 @@ export interface VideoChunk {
   durationSec: number;
   /** When this chunk was queued. */
   queuedAt: number;
+  /**
+   * Mid-frame park offset (seconds) for ambient crossfades. The FilmGate
+   * engine parks the incoming plane at this offset before rolling it in,
+   * so the room reads as "the camera fell back onto it" rather than "the
+   * clip restarted at 0". Defaults to a seeded random mid-position when
+   * omitted, which gives ambient triad crossfades their invisible look.
+   */
+  parkSec?: number;
+  /**
+   * Optional playback-rate dither (0.92–1.08 by convention). Applied to the
+   * plane during its first playback second to break pattern-recognition of
+   * the ambient loop, while still reading as the same room. Has no effect
+   * on live LTX / Veo cuts, which always want rate = 1.0.
+   */
+  rate?: number;
 }
 
 // ============================================================================
@@ -148,6 +184,12 @@ export interface OrchestrateRequest {
   currentBranch: BranchId;
   /** Optional: scene identifier for demo fallback. */
   sceneId?: string;
+  /**
+   * Per-role narrative state tags (e.g. film_source → "reels_running").
+   * Written on every committed branch; read into surface generation so the
+   * slate matches what already happened to that object — not a static menu.
+   */
+  objectStates?: Partial<Record<SemanticRole, string>>;
 }
 
 export interface OrchestrateResponse {

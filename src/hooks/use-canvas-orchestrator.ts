@@ -17,6 +17,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useCanvasStore } from "@/lib/canvas/store";
 import type { OrchestrateResponse, UserAction } from "@/lib/canvas/types";
+import { playActionVoice } from "@/lib/canvas/voice";
 
 export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const applyOrchestration = useCanvasStore((s) => s.applyOrchestration);
@@ -25,6 +26,7 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
   const commitBranch = useCanvasStore((s) => s.commitBranch);
   const clearSurfaces = useCanvasStore((s) => s.clearSurfaces);
   const branch = useCanvasStore((s) => s.branch);
+  const objectStates = useCanvasStore((s) => s.objectStates);
   const logAction = useCanvasStore((s) => s.logAction);
   const setHoverObject = useCanvasStore((s) => s.setHoverObject);
   const registerDetections = useCanvasStore((s) => s.registerDetections);
@@ -35,21 +37,34 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
 
   // ---------------------------------------------------------------------------
   // Frame capture (single JPEG) — used for Florence-2 detection and Veo seed
+  //
+  // fal.media clips taint the canvas unless <video crossOrigin="anonymous">
+  // loaded with CORS. Never throw — a missing frame must not block clicks.
   // ---------------------------------------------------------------------------
+  /** Minimal JPEG so orchestrate still accepts the body when capture is tainted. */
+  const PLACEHOLDER_FRAME =
+    "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAn/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGcP//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAQUCf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQMBAT8Bf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQIBAT8Bf//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEABj8Cf//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8hf//Z";
+
   const captureFrame = useCallback((): string | null => {
     const video = videoRef.current;
     if (!video) return null;
     const w = video.videoWidth;
     const h = video.videoHeight;
     if (!w || !h) return null;
-    const canvas = document.createElement("canvas");
-    const scale = Math.min(1, 1280 / w);
-    canvas.width = Math.floor(w * scale);
-    canvas.height = Math.floor(h * scale);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", 0.95);
+    try {
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 1280 / w);
+      canvas.width = Math.floor(w * scale);
+      canvas.height = Math.floor(h * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg", 0.95);
+    } catch (err) {
+      // SecurityError: cross-origin fal video without usable CORS
+      console.warn("[captureFrame] canvas tainted — using placeholder", err);
+      return null;
+    }
   }, [videoRef]);
 
   // ---------------------------------------------------------------------------
@@ -120,8 +135,9 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
   const handleClick = useCallback(
     async (xNorm: number, yNorm: number) => {
       if (isProcessing) return;
-      const frame = captureFrame();
-      if (!frame) return;
+      // Placeholder keeps clicks working after a fal cut taints the canvas
+      // (FAL_CHEAP mock detect ignores pixels; live Florence needs a real frame).
+      const frame = captureFrame() ?? PLACEHOLDER_FRAME;
       setIsProcessing(true);
       setHoverObject(null);
       try {
@@ -132,7 +148,8 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
             frame,
             click: { x: xNorm, y: yNorm },
             currentBranch: branch,
-            sceneId: "main",
+            objectStates,
+            sceneId: "cutting_room_7",
           }),
         });
         if (!res.ok) throw new Error(`orchestrate failed: ${res.status}`);
@@ -152,7 +169,7 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
         setIsProcessing(false);
       }
     },
-    [isProcessing, captureFrame, branch, applyOrchestration, registerDetections, setHoverObject, enterSlowMo, logAction]
+    [isProcessing, captureFrame, branch, objectStates, applyOrchestration, registerDetections, setHoverObject, enterSlowMo, logAction]
   );
 
   // ---------------------------------------------------------------------------
@@ -163,26 +180,19 @@ export function useCanvasOrchestrator(videoRef: React.RefObject<HTMLVideoElement
       if (isGenerating) return;
       setIsGenerating(true);
       clearSurfaces();
+      // Ghost VO under the wait — plays while LTX/Veo generate (cut around in edit if needed).
+      playActionVoice(action.actionId);
       logAction(`Action: ${action.label} (${action.actionId})`, "action");
       try {
-        // Capture the current frame (JPEG seed for Veo / Florence fallback)
+        // JPEG still for Veo; skip the 2s MediaRecorder wait — server seeds
+        // from room_seed.mp4 (captures are too short for LTX anyway).
         const lastFrame = captureFrame();
-        // Capture the most recent ~2s as an mp4 blob for LTX extend-video.
-        const lastFrameVideo = await captureRecentVideo(2000);
 
         const fd = new FormData();
         fd.append("action", JSON.stringify(action));
         fd.append("currentBranch", branch);
-        fd.append("sceneId", "main");
+        fd.append("sceneId", "cutting_room_7");
         if (lastFrame) fd.append("lastFrame", lastFrame);
-        if (lastFrameVideo) {
-          fd.append(
-            "lastFrameVideo",
-            new File([lastFrameVideo], `capture-${Date.now()}.mp4`, {
-              type: lastFrameVideo.type || "video/mp4",
-            })
-          );
-        }
 
         const res = await fetch("/api/canvas/generate", {
           method: "POST",

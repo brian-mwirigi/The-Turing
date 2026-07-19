@@ -13,7 +13,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { detectObjects, isLiveMode } from "@/lib/canvas/fal-client";
+import { detectObjects, isLiveMode, skipLlm } from "@/lib/canvas/fal-client";
 import {
   buildSurfaceMessage,
   findClickedObject,
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     }
 
     const t0 = Date.now();
-    const sceneId = body.sceneId ?? "main";
+    const sceneId = body.sceneId ?? "cutting_room_7";
 
     // 1. Florence-2 detection (live or demo fallback)
     const detections = await detectObjects(body.frame, sceneId);
@@ -62,25 +62,48 @@ export async function POST(req: NextRequest) {
       | { root: import("@/lib/canvas/types").A2UIComponent; reason?: string; suggestedBranch?: import("@/lib/canvas/types").BranchId }
       | undefined;
 
-    if (isLlmLive()) {
+    const objectStates = body.objectStates ?? {};
+    const role = detected.semanticRole ?? "unknown";
+    const objectState = objectStates[role];
+
+    // LLM surfaces (unless FAL_SKIP_LLM). Thread object state so menus aren't static.
+    if (isLlmLive() && !skipLlm()) {
       const llmResult = await generateSurface({
         object: detected,
         branch: body.currentBranch,
+        objectState,
+        objectStates: objectStates as Record<string, string>,
       });
       if (llmResult.ok && llmResult.surface) {
+        // The LLM is permitted to suggest the next branch through the surface's
+        // `suggestedBranch` hint (read defensively; if it's not a valid
+        // BranchId it's just ignored in favour of the deterministic catalog).
+        const suggestedRaw = (llmResult.surface as { suggestedBranch?: string }).suggestedBranch;
+        const VALID_BRANCHES: import("@/lib/canvas/types").BranchId[] = [
+          "taking", "splice", "roll_take", "cut_take", "continue_page",
+          "scratch_line", "sign_off", "warm_grade", "cold_grade", "bleach_grade",
+          "page_studio", "summon_operator", "recover", "burn", "rewind",
+          "advance_clock", "extend_establish", "cutto_interior", "neutral",
+        ];
+        const suggestedBranch = (VALID_BRANCHES as string[]).includes(suggestedRaw ?? "")
+          ? (suggestedRaw as import("@/lib/canvas/types").BranchId)
+          : undefined;
         surfaceSpec = {
           root: llmResult.surface.root,
           reason: llmResult.surface.reason,
-          suggestedBranch:
-            (["main", "alert", "reboot", "neutral", "veo31"] as const).find(
-              (b) => b === (llmResult.surface as { suggestedBranch?: string }).suggestedBranch
-            ) ?? undefined,
+          suggestedBranch,
         };
       }
     }
 
-    // 4. Build the A2UI message (uses LLM spec if present, else SURFACE_CATALOG)
-    const { a2ui, suggestedBranch } = buildSurfaceMessage(detected, surfaceSpec);
+    // 4. Build the A2UI message — injects deterministic static action first
+    const branch = (body.currentBranch as import("@/lib/canvas/types").BranchId) || "taking";
+    const { a2ui, suggestedBranch } = buildSurfaceMessage(
+      detected,
+      surfaceSpec,
+      branch,
+      objectStates,
+    );
     const tOrch = Date.now();
 
     const response: OrchestrateResponse = {

@@ -1,98 +1,114 @@
 "use client";
 
 /**
- * Turing-Complete Canvas — main page
+ * Turing-Complete Canvas — cutting-room main page.
  *
- * Layered composition:
- *   z-0   DoubleBufferedVideo (the generative stream)
- *   z-10  BoundingBoxOverlay (invisible clickable layer + hover reticle)
- *   z-20  (free)
- *   z-30  A2UISurfaceRenderer(s) + HUDOverlay
- *   z-50  IntroOverlay (until booted)
+ * Entry sequence:
+ *   1. SoundGate     — blank void, "Click to hear sound" (unlocks audio)
+ *   2. TitlePlate    — landing with intro.mp4 + ambient projector hum
+ *   3. Diorama/film  — live cutting room after a second click
  *
- * The video element ref is shared between DoubleBufferedVideo and the
- * orchestrator hook so the hook can capture frames for Florence-2 / LTX-2.3.
+ * Layered composition once in the film:
+ *   z-0    Diorama            (curved projection hosting FilmGate)
+ *   z-20   RiverReticle       (16mm projectionist's iris)
+ *   z-30   FilmSlate × n      (cutting-room slates rising from the sash)
+ *   z-40   Generating/processing pulse
  */
 
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
-import { DoubleBufferedVideo } from "@/components/canvas/DoubleBufferedVideo";
-import { BoundingBoxOverlay } from "@/components/canvas/BoundingBoxOverlay";
-import { A2UISurfaceRenderer } from "@/components/canvas/A2UISurfaceRenderer";
-import { HUDOverlay } from "@/components/canvas/HUDOverlay";
-import { IntroOverlay } from "@/components/canvas/IntroOverlay";
+import { Diorama } from "@/components/canvas/Diorama";
+import { RiverReticle } from "@/components/canvas/RiverReticle";
+import { FilmSlate } from "@/components/canvas/FilmSlate";
+import { SoundGate } from "@/components/canvas/SoundGate";
+import { TitlePlate, type TitlePlateHandle } from "@/components/canvas/TitlePlate";
+import { useProjectorSound } from "@/components/canvas/ProjectorSound";
+import type { FilmGateHandle } from "@/components/canvas/FilmGate";
 import { useCanvasStore } from "@/lib/canvas/store";
 import { useCanvasOrchestrator } from "@/hooks/use-canvas-orchestrator";
 import type { UserAction } from "@/lib/canvas/types";
 
-export default function Home() {
-  // Hidden primary video element used only for frame capture (matches what's
-  // currently visible). We render a single <video> inside DoubleBufferedVideo
-  // and expose it via ref forwarding through a global stash.
-  const captureVideoRef = useRef<HTMLVideoElement | null>(null);
+type Phase = "sound" | "title" | "main";
 
-  const [booted, setBooted] = useState(false);
-  const [isLive, setIsLive] = useState(false);
+export default function Home() {
+  const gateRef = useRef<FilmGateHandle | null>(null);
+  const titleRef = useRef<TitlePlateHandle | null>(null);
+  const captureVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [phase, setPhase] = useState<Phase>("sound");
+  const { start: startSound } = useProjectorSound();
 
   const bootMain = useCanvasStore((s) => s.bootMain);
   const surfaces = useCanvasStore((s) => s.surfaces);
-  const hoverObject = useCanvasStore((s) => s.hoverObject);
   const lastDetections = useCanvasStore((s) => s.lastDetections);
   const setHoverObject = useCanvasStore((s) => s.setHoverObject);
   const dismissSurface = useCanvasStore((s) => s.dismissSurface);
   const setLive = useCanvasStore((s) => s.setLive);
-  const isSlowMo = useCanvasStore((s) => s.isSlowMo);
+  const clearSurfaces = useCanvasStore((s) => s.clearSurfaces);
+  const isLive = useCanvasStore((s) => s.isLive);
 
-  const { handleClick, handleAction, dismissAll, isProcessing, isGenerating, lastTimings } =
+  const { handleClick, handleAction, isProcessing, isGenerating } =
     useCanvasOrchestrator(captureVideoRef);
 
-  // Check live mode on mount. Server returns { live, llm } reflecting whether
-  // FAL_KEY is set (live = florence-2/video gen; llm = A2UI surface authoring).
+  // Check live mode on mount (engine ping)
   useEffect(() => {
     fetch("/api/canvas/orchestrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame: "ping", click: { x: 0, y: 0 }, currentBranch: "main", sceneId: "ping" }),
+      body: JSON.stringify({
+        frame: "ping",
+        click: { x: 0, y: 0 },
+        currentBranch: "taking",
+        sceneId: "cutting_room_7",
+      }),
     })
       .then((r) => r.json())
       .then((data) => {
         const live = data?.live === true || data?.llm === true;
-        setIsLive(live);
         setLive(live);
       })
-      .catch(() => setIsLive(false));
+      .catch(() => setLive(false));
   }, [setLive]);
 
-  // Detections for the overlay: use the most recent Florence-2 run. On boot
-  // (before the first run completes) the overlay is empty/clickable — the
-  // first click triggers detection and the box appears; heat-seeking users can
-  // immediately fire `summon_operator` from the keystroke hint in the HUD.
-  const detections = lastDetections;
-
-  // Sync the captureVideoRef to the actually-playing <video> in DoubleBufferedVideo.
-  // We do this by querying the DOM after mount.
+  // Sync captureVideoRef to the FilmGate's currently playing plane.
   useEffect(() => {
-    if (!booted) return;
-    const interval = setInterval(() => {
-      const videos = document.querySelectorAll("video");
-      for (const v of videos) {
-        // Pick the one that's currently playing (has src and not paused)
-        if (v.src && !v.paused && v.videoWidth > 0) {
-          captureVideoRef.current = v;
-          break;
-        }
-      }
-    }, 500);
-    return () => clearInterval(interval);
-  }, [booted]);
+    if (phase !== "main") return;
+    const sync = () => {
+      const v = gateRef.current?.captureVideo() ?? null;
+      if (v && v.videoWidth > 0) captureVideoRef.current = v;
+    };
+    sync();
+    const id = window.setInterval(sync, 500);
+    return () => window.clearInterval(id);
+  }, [phase]);
 
-  // Click handler wraps orchestrator + closes any open surfaces first
+  // Escape clears any open slates (FilmSlate fires synthetic Escape on ×).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && Object.keys(surfaces).length > 0) {
+        clearSurfaces();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [surfaces, clearSurfaces]);
+
+  const onUnlockSound = () => {
+    // Same user gesture: ambient hum + unmute the landing intro plate.
+    startSound();
+    titleRef.current?.unlockAudio();
+    setPhase("title");
+  };
+
+  const onBootFilm = () => {
+    bootMain();
+    setPhase("main");
+  };
+
   const onVideoClick = (xNorm: number, yNorm: number) => {
     if (isProcessing || isGenerating) return;
     handleClick(xNorm, yNorm);
   };
 
-  // Surface action handler
   const onSurfaceAction = (surfaceId: string, actionId: string, label: string) => {
     const surface = surfaces[surfaceId];
     const action: UserAction = {
@@ -104,121 +120,88 @@ export default function Home() {
     handleAction(action);
   };
 
+  const inFilm = phase === "main";
+  const audioUnlocked = phase !== "sound";
+
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-black text-slate-100">
-      {/* ===== Generative video stream ===== */}
-      {booted && <DoubleBufferedVideo />}
+    <main className="fixed inset-0 overflow-hidden room-void">
+      {inFilm && (
+        <>
+          <Diorama gateRef={gateRef} muted={false} />
 
-      {/* ===== Invisible interactive overlay ===== */}
-      {booted && (
-        <BoundingBoxOverlay
-          detections={detections}
-          onHover={setHoverObject}
-          onClick={onVideoClick}
-          enabled={!isProcessing && !isGenerating}
-        />
-      )}
+          <RiverReticle
+            detections={lastDetections}
+            onHover={setHoverObject}
+            onClick={onVideoClick}
+            enabled={!isProcessing && !isGenerating}
+          />
 
-      {/* ===== A2UI surfaces ===== */}
-      {booted && (
-        <div className="pointer-events-none absolute inset-0 z-30">
-          <div className="pointer-events-auto">
-            <AnimatePresence>
-              {Object.values(surfaces).map((surface) => (
-                <A2UISurfaceRenderer
-                  key={surface.id}
-                  surface={surface}
-                  onAction={(actionId, label) => onSurfaceAction(surface.id, actionId, label)}
-                  onDismiss={() => dismissSurface(surface.id)}
-                />
-              ))}
-            </AnimatePresence>
-          </div>
-        </div>
-      )}
-
-      {/* ===== HUD ===== */}
-      {booted && <HUDOverlay lastTimings={lastTimings} />}
-
-      {/* ===== Generating indicator ===== */}
-      {booted && isGenerating && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40">
-          <div className="flex items-center gap-3 rounded-md border border-fuchsia-400/40 bg-slate-950/90 px-4 py-2.5 backdrop-blur">
-            <div className="h-2 w-2 rounded-full bg-fuchsia-400 animate-pulse" />
-            <span className="font-mono text-xs uppercase tracking-wider text-fuchsia-200">
-              generating branch · LTX-2.3
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* ===== Processing indicator (orchestration in flight) ===== */}
-      {booted && isProcessing && !isGenerating && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40">
-          <div className="flex items-center gap-3 rounded-md border border-cyan-400/40 bg-slate-950/90 px-4 py-2.5 backdrop-blur">
-            <div className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
-            <span className="font-mono text-xs uppercase tracking-wider text-cyan-200">
-              florence-2 scanning…
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* ===== Click ripple (slow-mo feedback) ===== */}
-      {booted && isSlowMo && !isGenerating && (
-        <div className="pointer-events-none absolute inset-0 z-10">
-          <div className="absolute inset-0 bg-fuchsia-500/5 mix-blend-screen" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-fuchsia-300/40">
-              t i m e · d i l a t e d
+          <div className="pointer-events-none absolute inset-0 z-30">
+            <div className="pointer-events-auto">
+              <AnimatePresence>
+                {Object.values(surfaces).map((surface) => (
+                  <FilmSlate
+                    key={surface.id}
+                    surface={surface}
+                    onAction={(actionId, label) =>
+                      onSurfaceAction(surface.id, actionId, label)
+                    }
+                    onDismiss={() => dismissSurface(surface.id)}
+                  />
+                ))}
+              </AnimatePresence>
             </div>
           </div>
-        </div>
+
+          {isGenerating && (
+            <div className="pointer-events-none absolute top-1/2 left-1/2 z-40 -translate-x-1/2 -translate-y-1/2">
+              <div className="reticle-iris flex h-16 w-16 animate-pulse items-center justify-center">
+                <span
+                  className="text-[11px] uppercase tracking-[0.42em]"
+                  style={{
+                    fontFamily: "var(--font-studio)",
+                    color: "rgba(233,210,163,0.52)",
+                  }}
+                >
+                  cutting
+                </span>
+              </div>
+            </div>
+          )}
+
+          {isProcessing && !isGenerating && (
+            <div className="pointer-events-none absolute top-1/2 left-1/2 z-40 -translate-x-1/2 -translate-y-1/2">
+              <div className="reticle-iris flex h-12 w-12 items-center justify-center">
+                <span
+                  className="text-[9px] uppercase tracking-[0.42em]"
+                  style={{
+                    fontFamily: "var(--font-studio)",
+                    color: "rgba(233,210,163,0.40)",
+                  }}
+                >
+                  slate
+                </span>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
-      {/* ===== Reset button (top-right corner of viewport) ===== */}
-      {booted && (
-        <button
-          onClick={() => {
-            dismissAll();
-          }}
-          className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 rounded border border-slate-700/60 bg-slate-950/70 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 hover:bg-slate-800/70"
-        >
-          [esc] dismiss panels
-        </button>
-      )}
-
-      {/* ===== Escape key handler ===== */}
-      <EscapeKeyHandler onEscape={() => dismissAll()} enabled={booted} />
-
-      {/* ===== Intro ===== */}
       <AnimatePresence>
-        {!booted && (
-          <IntroOverlay
+        {!inFilm && (
+          <TitlePlate
+            key="title"
+            ref={titleRef}
+            onBoot={onBootFilm}
             isLive={isLive}
-            onBoot={() => {
-              bootMain();
-              setBooted(true);
-            }}
+            audioUnlocked={audioUnlocked}
           />
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {phase === "sound" && <SoundGate key="sound" onUnlock={onUnlockSound} />}
+      </AnimatePresence>
     </main>
   );
-}
-
-/**
- * Escape key handler — mounts a global keydown listener that dismisses all
- * surfaces when `Escape` is pressed.
- */
-function EscapeKeyHandler({ onEscape, enabled }: { onEscape: () => void; enabled: boolean }) {
-  useEffect(() => {
-    if (!enabled) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onEscape();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onEscape, enabled]);
-  return null;
 }

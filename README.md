@@ -1,39 +1,22 @@
 # The Turing-Complete Canvas
 
-Most generative video demos hand you a finished painting and ask you to watch.
+*A filmmaker died mid-edit of the only film she ever cared about. Her cutting room was left as it was. You don't watch it — you finish it.*
 
-This one hands you the brush.
-
-A hallucinated sci-fi server room streams like an infinite film. Click a rack,
-a console, a sparking node — and the frame stops being footage. A control panel
-materializes over the object. You choose. The next clip is generated to make
-your choice *visible*: sparks die, lights flood red, an operator walks into
-frame. Video stops being an MP4. It becomes a spatial operating system.
-
-Built for the **fal × Sequoia Developer Track** as a working prototype of
-batch-size-1 software — interfaces that exist only for the intent you just had.
-
-> Full strategic thesis: [`PLAYBOOK.md`](./PLAYBOOK.md)
+One streaming hallucination, one agent, one continuation model. The film stock is the file system.
 
 ---
 
-## The loop
+## What it does
 
-One interaction. No menus. No dashboard.
+You walk in through a black title card. A 1974 cutting room rises on a curved projection surface that parallax-tracks your eye, the projector humming at floor level. No HUD. No chrome. The room is paused — the coffee is cold, the reels are still, the typewriter has the carriage mid-return on an unfinished line.
 
-1. **Boot** — a cinematic server room streams through a double-buffered
-   `<video>` pair that crossfades into what feels like infinite playback.
-2. **Click** — Florence-2 maps every semantic object in the frame to a
-   normalized bounding box. A hit-test finds what you meant.
-3. **Surface** — an LLM authors an A2UI panel (declarative JSON → real UI)
-   anchored to that object. Playback drops to 0.15×. Latency becomes slow-mo.
-4. **Act** — you press a control. A second LLM rewrite stamps your action into
-   the continuation prompt. The client grabs ~2s of live video via
-   `MediaRecorder` and:
-   - most actions → **LTX-2.3 extend-video** (true video→video branch)
-   - `summon_operator` → **Veo 3.1** (8s cinematic hero beat from a still)
-5. **Crossfade** — the new chunk takes the primary buffer. Speed snaps back.
-   The world you chose is now the world you see.
+1. You click anything in the frame.
+2. A lens-focus ring settles over the object. Florence-2 mapped it.
+3. A thin slate strip prints onto the glass — the agent wrote your UI as if you were using the desk itself: splice deck, take control, note editor, grade desk, studio desk.
+4. You pick an edit. The room extends the actual film from your choice. LTX-2.3 for rapid branching. Veo 3.1 reserved for the one moment she comes back.
+5. Two seconds later the crossfade takes you to the consequence, the projector never breaking its drone.
+
+The room remembers every grade you pick, every line you type, every frame you splice — that's the temporal-persistence-of-state thesis the playbook demands. The interface is the subject matter; there is no wrapper.
 
 ---
 
@@ -41,45 +24,48 @@ One interaction. No menus. No dashboard.
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
-| **DEMO** | `FAL_KEY` unset | Mock detections, procedural mp4s, catalog surfaces. Fully offline. |
-| **LIVE** | `FAL_KEY` set | Real Florence-2, LLM surfaces, LTX extend-video, Veo 3.1 heroes. |
-
-Live still falls back to demo assets if a fal call fails — so a venue Wi-Fi
-outage cannot kill the pitch.
+| **DEMO** | `FAL_KEY` unset | Mock detections mapped to cutting-room objects + pre-rendered mp4s from `public/canvas/` + deterministic slate catalog + an artificial latency pause to exercise the slow-mo mask. Fully offline. |
+| **LIVE** | `FAL_KEY` set | Real Florence-2 detection on `fal-ai/florence-2-large/open-vocabulary-detection`. LLM-authored A2UI slates via fal's OpenRouter OpenAI-compatible proxy (`google/gemini-2.5-flash` by default). LTX-2.3 quality extend-video from the last ~2s of captured mp4. Veo 3.1 image-to-video reserved exclusively for the `summon_operator` hero beat (Imogen returns). All gracefully fall back to demo assets when any endpoint returns empty. |
 
 ---
 
-## Quick start
+## fal.ai integration
 
-```bash
-bun install
+A single `FAL_KEY` opens the cutting room.
 
-cp .env.example .env   # optional: set FAL_KEY for LIVE mode
-
-bun run dev            # http://localhost:3000
-```
-
-No key? You still get the full click → panel → branch loop on procedural
-assets. The brush works either way.
+| Capability | Endpoint | See it |
+|------------|----------|-------|
+| Zero-shot detection | `fal-ai/florence-2-large/open-vocabulary-detection` | Click anything in the frame — Florence sends absolute-pixel bboxes + the server normalizes via `image.width/height` to the cutting-room seven-object map. |
+| Video continuation | `fal-ai/ltx-2.3-quality/extend-video` | Your captured ~2s mp4 gets uploaded to `fal.storage.upload`, then extended forward (seam locked at `video_strength=1`). Every editing branch except summon_operator flows through this. |
+| Hero moment | `fal-ai/veo3.1/fast/image-to-video` | The `summon_operator` action — a JPEG of the current frame seeds 8s of cinematic 4K character dialogue at 16:9. Fires exactly once per demo. |
+| LLM | `https://fal.run/openrouter/router/openai/v1` | Two-step: (1) author a Zod-validated A2UI slate JSON for the clicked object in the register of a film-desk annotation, (2) rewrite the extend-video prompt so the next clip visibly reflects your edit. Falls back to the deterministic `SURFACE_CATALOG` in `orchestrator.ts` on any failure. |
 
 ---
 
-## fal.ai stack
+## Creative bible
 
-One key. Four capabilities.
+See `STORYLINE.md` for the full narrative: logline, characters, branch narrative, the object map, and the closing shot. The TL;DR:
 
-| Capability | Endpoint | Role |
-|------------|----------|------|
-| Detection | `fal-ai/florence-2-large/open-vocabulary-detection` | Click → object → bbox |
-| Continuation | `fal-ai/ltx-2.3-quality/extend-video` | Video→video branch, seam locked |
-| Hero | `fal-ai/veo3.1/fast/image-to-video` | Operator arrival, 8s 16:9 |
-| LLM | fal OpenRouter (`Authorization: Key ${FAL_KEY}`) | A2UI JSON + prompt rewrite |
+- **Setting:** Cutting Room 7, 1974 — a Steenbeck flatbed, a Bolex on a tripod, a Royal typewriter with an unfinished line, a cold mug of coffee, a green-lit wall intercom, a long vertical light shaft, and a tall window onto a grey Pacific coast.
+- **Object map (`public/canvas/scene_objects.json`):** seven clickable objects mapped to seven semantic roles.
+- **Branches (stateful):** `taking` (boot, null hypothesis) → `splice` / `roll_take` / `cut_take` / `continue_page` / `sign_off` / `warm_grade` / `cold_grade` / `bleach_grade` / `page_studio` / `recover` / `burn` / `rewind` / `advance_clock` / `extend_establish` / `cutto_interior` → and one reserved Veo hero beat: `summon_operator`.
+- **Closing:** the room still running, the reel still on the cut you left it, the title card returning inverted. *You did not watch this film. You kept it.*
 
-**LLM step 1 — surface.** Object + branch → Zod-validated A2UI tree. Fail →
-`SURFACE_CATALOG` fallback.
+---
 
-**LLM step 2 — persistence.** Action + branch → `{ branch, promptSuffix }` so
-the next clip *shows* what you did. Fail → `planBranchForAction`.
+## Demo assets (`public/canvas/`)
+
+The current clips are placeholders. To ship a real demo, replace them in-place with licensed stock or generated footage matching these spec slots:
+
+| File | Used as | Spec |
+|------|---------|------|
+| `scene_main.mp4` | boot / null hypothesis / `taking` | 6s · 1280x720 · 24fps · the cutting room wide, paused, ambient hum |
+| `branch_neutral.mp4` | `neutral`, `cut_take`, `continue_page`, `sign_off`, `rewind`, `advance_clock`, `scratch_line`, `cold_grade` | 6s · any 16mm-graded gentle-motion continuation |
+| `branch_alert.mp4` | `roll_take`, `burn`, `warm_grade`, `page_studio`, `extend_establish` | 6s · slightly more active beat (reels turning, light leaking, the door visible stage-left) |
+| `branch_reboot.mp4` | `splice`, `recover`, `bleach_grade`, `summon_operator` (demo stand-in for Veo) | 6s · the closest we have to an emotional curve; should read as "the room acknowledges the edit" |
+| `poster.jpg` | intro poster image | 1280x720 · 16mm-graded wide of the cutting room |
+
+For an even stronger demo, replace the four mp4s above with five to seven short discrete cuts (one per branch family) and extend `DEMO_BRANCH_URLS` in `src/lib/canvas/store.ts` and `src/app/api/canvas/generate/route.ts` to point each branch id at its own clip.
 
 ---
 
@@ -88,59 +74,45 @@ the next clip *shows* what you did. Fail → `planBranchForAction`.
 ```
 src/
 ├─ app/
-│  ├─ page.tsx                          # Boot, overlays, surface mount
+│  ├─ page.tsx                       # Mounts the sphere, reticle, & slate strip
 │  └─ api/canvas/
-│     ├─ orchestrate/route.ts           # frame+click → Florence-2 + LLM surface
-│     └─ generate/route.ts              # mp4+jpg → extend-video or Veo hero
+│     ├─ orchestrate/route.ts        # Florence-2 + LLM slate
+│     └─ generate/route.ts           # multipart (mp4+jpg) → extend-video or Veo hero
 ├─ components/canvas/
-│  ├─ DoubleBufferedVideo.tsx           # Crossfade engine
-│  ├─ BoundingBoxOverlay.tsx            # Click layer + hover reticle
-│  ├─ A2UISurfaceRenderer.tsx           # A2UI JSON → React
-│  ├─ HUDOverlay.tsx                    # Telemetry / mode badge
-│  └─ IntroOverlay.tsx                  # First-15s hook
+│  ├─ SphericalProjection.tsx        # Parallax-tracking projection surface
+│  ├─ DoubleBufferedVideo.tsx        # Crossfade engine
+│  ├─ BoundingBoxOverlay.tsx         # Cinemascope focus-ring reticle
+│  ├─ A2UISurfaceRenderer.tsx        # Slate/subtitle strip (A2UI-faithful)
+│  ├─ IntroOverlay.tsx               # Cinematic fade-in with aperture-ring invitation
+│  └─ AmbientProjector.tsx           # Web Audio API 41/87 Hz low drone
 ├─ hooks/
-│  └─ use-canvas-orchestrator.ts        # Frame + clip capture, both endpoints
+│  └─ use-canvas-orchestrator.ts     # Frame + mp4 capture, POST orchestrator/generate
 └─ lib/canvas/
-   ├─ fal-client.ts                     # Florence-2, extend, Veo, upload
-   ├─ llm-orchestrator.ts               # Two-step LLM + Zod
-   ├─ orchestrator.ts                   # Geometry + catalog fallback
-   ├─ store.ts                          # Buffers, branch, slow-mo
-   └─ types.ts
-
-public/canvas/                          # Demo mp4s + scene_objects.json
-scripts/generate_demo_assets.py         # Offline procedural generator
+   ├─ fal-client.ts                  # Florence-2 + extendVideo + Veo hero + storage upload
+   ├─ llm-orchestrator.ts            # Two-step LLM (slate + rewrite), Zod-validated
+   ├─ orchestrator.ts                # Geometry hit-test + slate catalog fallback
+   ├─ store.ts                       # Zustand — buffers, branch, surfaces, slow-mo
+   └─ types.ts                       # Core A2UI + detection + generation types
+public/canvas/
+   ├─ scene_objects.json             # Cutting-room object map + base prompt
+   ├─ scene_main.mp4, branch_*.mp4   # Demo footage slots (swap with real assets)
+   └─ poster.jpg
 ```
 
 ---
 
-## Interaction map
+## Quick start
 
-| User action | Branch | Path |
-|-------------|--------|------|
-| Click empty space | — | `clear` A2UI op |
-| Click `faulty_asset` | `alert` | reboot / trigger_alert / isolate |
-| Click `operator_interface` | `neutral` | continue / standby / summon_operator |
-| Click `hvac_component` | `neutral` | lower_temp / boost_fan |
-| Click `security_node` | `alert` | lockdown / review_logs |
-| Action `summon_operator` | `veo31` | Veo 3.1 hero, JPEG seed |
-| Any other action | LLM-chosen | LTX-2.3 extend-video, mp4 seed |
+```bash
+bun install                 # one dep list, one runtime
+# (Add FAL_KEY to .env for live mode)
+bun run dev                 # http://localhost:3000
+bunx tsc --noEmit           # zero errors
+bun run lint                # exit 0
+bun run build
+```
 
-`summon_operator` is the flagship contrast: LTX for rapid environmental
-branching, Veo for the irreplaceable human beat. That gap *is* the demo.
-
----
-
-## Implementation notes
-
-- **Normalize on the server.** Florence-2 returns absolute px + image dims;
-  the client never guesses capture size.
-- **Seed LTX with real mp4, not a JPEG.** ~2s `MediaRecorder` capture → fal
-  storage → extend-video. Video→video, as the playbook demands.
-- **`video_strength: 1` + `num_context_frames: 17`** lock the seam; the
-  frontend crossfades over 0.45s.
-- **Degrade everywhere.** Bad LLM JSON → catalog. Empty URL → demo mp4.
-  No key → full interactive mock.
-- **Latency is cinema.** Click → 0.15×. Commit → 1.0×. The wait is the beat.
+Without `FAL_KEY`, the app boots straight into DEMO mode and the full interaction loop is exercisable, including the slow-mo latency mask and the pre-rolled cutting-room footage.
 
 ---
 
@@ -148,20 +120,16 @@ branching, Veo for the irreplaceable human beat. That gap *is* the demo.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `FAL_KEY` | LIVE mode | — | Florence-2, LTX, Veo, storage, LLM |
-| `FAL_LLM_MODEL` | no | `google/gemini-2.5-flash` | OpenRouter model via fal |
-| `DATABASE_URL` | scaffold only | `file:./dev.db` | Prisma leftover; canvas ignores it |
+| `FAL_KEY` | for LIVE | — | Unlocks all fal.ai endpoints + the LLM proxy. |
+| `FAL_LLM_MODEL` | no | `google/gemini-2.5-flash` | Any model served by the fal OpenRouter proxy. |
+| `DATABASE_URL` | scaffold | `file:./dev.db` | Required by scaffold's Prisma; the canvas doesn't touch it. |
 
 ---
 
-## Credits
+## Notes
 
-Built on fal for the fal × Sequoia Developer Track. Demo assets from
-`scripts/generate_demo_assets.py`. Architecture from `PLAYBOOK.md`. Every live
-call has a deterministic fallback so the stage never goes black.
-
----
-
-Everyone else is shipping a painting.
-
-We're giving you the brush — and asking you to paint.
+- **Coordinate normalization lives on the server.** Florence-2 returns absolute-pixel bboxes + the processed `image.width/height`; the server normalizes so the client never guesses capture dimensions.
+- **A real mp4 seeds extend-video.** The client captures ~2s via `MediaRecorder`, uploads the blob to `fal.storage`, and the server hands the hosted URL to extend-video — true video-to-video branching.
+- **Graceful degradation everywhere.** LLM Zod failure → catalog slate. Empty video URL → demo branch mp4. No `FAL_KEY` → entire pipeline mocked but the spherical projection, drone, and interactive gesture all stay live.
+- **Veo 3.1 fires exactly once per demo.** Restrained by design — reserve the most expensive shot for the most emotional beat. Demo mode reuses the splice clip so the curve still survives offline.
+- The spherical parallax tilts ±4°/±16px on cursor drift. The ambient drone runs at 41 Hz with an 87 Hz harmonic, fading in over 1.2s; the projector never stops until the tab closes.

@@ -1,12 +1,8 @@
 /**
  * Zustand store for the Turing-Complete Canvas.
  *
- * Holds:
- *   - The double-buffered video queue (primary + secondary)
- *   - The current A2UI surfaces (keyed by surface id)
- *   - The current branch context
- *   - Detection state (hover bbox, last click)
- *   - Latency-masking slow-mo state
+ * Ambient film is `room_loop.mp4`. Live LTX/Veo cuts override it when generate
+ * returns a URL; demo / fallback branches reuse the same ambient loop.
  */
 
 import { create } from "zustand";
@@ -15,54 +11,112 @@ import type {
   BranchId,
   DetectedObject,
   OrchestrateResponse,
-  UserAction,
+  SemanticRole,
   VideoChunk,
 } from "./types";
 
-// ============================================================================
-// Demo asset map (used when FAL_KEY is not set)
-// ============================================================================
-
-const DEMO_BRANCH_URLS: Record<BranchId, string> = {
-  main: "/canvas/scene_main.mp4",
-  alert: "/canvas/branch_alert.mp4",
-  reboot: "/canvas/branch_reboot.mp4",
-  neutral: "/canvas/branch_neutral.mp4",
-  // Veo 3.1 has no procedural fallback; reuse reboot clip so slow-mo + crossfade still demo cleanly.
-  veo31: "/canvas/branch_reboot.mp4",
+/**
+ * Map a committed branch → which object role it touched + a short state tag
+ * for the next surface-generation call ("clicked film_source, state: burning").
+ */
+/** Keep tags aligned with `object-state-machine` so phase resolve stays crisp. */
+const BRANCH_OBJECT_STATE: Partial<
+  Record<BranchId, { role: SemanticRole; state: string }>
+> = {
+  splice: { role: "film_source", state: "reels_running — splice live, join held" },
+  recover: { role: "film_source", state: "ghost_take — reels_running under a second exposure" },
+  burn: { role: "film_source", state: "leader_burnt — join lost, smoke in the shaft" },
+  roll_take: { role: "camera_asset", state: "take_rolling — spring wound, gate open" },
+  cut_take: { role: "camera_asset", state: "lens_capped — stopped after cut" },
+  continue_page: { role: "manuscript", state: "page_open — typing, carriage mid-line" },
+  scratch_line: { role: "manuscript", state: "page_torn — sheet pulled from the platen" },
+  sign_off: { role: "manuscript", state: "note_signed — name at the foot of the page" },
+  advance_clock: { role: "artifact_unset", state: "clock_forward — advanced, steam returned" },
+  rewind: { role: "artifact_unset", state: "clock_rewound — cold again after fold-back" },
+  page_studio: { role: "operator_interface", state: "studio_paged — line ringing" },
+  summon_operator: { role: "operator_interface", state: "operator_called — final take queued" },
+  warm_grade: { role: "vfx_element", state: "grade_warm — amber afternoon live" },
+  cold_grade: { role: "vfx_element", state: "grade_cold — morning-after blue live" },
+  bleach_grade: { role: "vfx_element", state: "grade_bleach — silver final-cut look live" },
+  extend_establish: { role: "scene_extern", state: "on_the_coast — establishing" },
+  cutto_interior: { role: "scene_extern", state: "back_inside — interior" },
 };
 
-// ============================================================================
-// Store type
-// ============================================================================
+/** TitlePlate landing plate only — never boot this into FilmGate. */
+export const DEMO_INTRO = "/canvas/intro.mp4";
+
+/**
+ * Ambient room loop after "click inside the film".
+ * Also used as the LTX seed source on disk (`fal-client.uploadRoomLoopSeed`).
+ */
+export const DEMO_ROOM = "/canvas/room_loop.mp4";
+
+/** @deprecated use DEMO_ROOM */
+export const DEMO_VIDEO = DEMO_ROOM;
+
+const BRANCH_IDS = [
+  "taking",
+  "splice",
+  "roll_take",
+  "cut_take",
+  "continue_page",
+  "scratch_line",
+  "sign_off",
+  "warm_grade",
+  "cold_grade",
+  "bleach_grade",
+  "page_studio",
+  "recover",
+  "burn",
+  "rewind",
+  "advance_clock",
+  "extend_establish",
+  "cutto_interior",
+  "summon_operator",
+  "neutral",
+] as const satisfies readonly BranchId[];
+
+const DEMO_BRANCH_URLS: Record<BranchId, string> = Object.fromEntries(
+  BRANCH_IDS.map((id) => [id, DEMO_ROOM]),
+) as Record<BranchId, string>;
+
+/** Fire-and-forget warm-up so first generate doesn't pay fal.storage upload tax. */
+let _seedTriggered = false;
+export function eagerSeedUploadForLive(): void {
+  if (_seedTriggered) return;
+  _seedTriggered = true;
+  try {
+    void fetch("/api/canvas/seed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(
+      (r) => (r.ok ? r.json() : Promise.reject()),
+      () => {
+        /* swallow */
+      },
+    );
+  } catch {
+    /* never throw from boot */
+  }
+}
 
 interface CanvasState {
-  // --- Video buffer state ---
   primaryChunk: VideoChunk | null;
-  secondaryChunk: VideoChunk | null; // pre-buffered continuation
+  secondaryChunk: VideoChunk | null;
   isBuffering: boolean;
   branch: BranchId;
-
-  // --- Detection state ---
   hoverObject: DetectedObject | null;
   lastDetections: DetectedObject[];
   lastClick: { x: number; y: number; t: number } | null;
-
-  // --- A2UI surfaces ---
   surfaces: Record<string, A2UISurface>;
-
-  // --- Latency masking ---
   isSlowMo: boolean;
-  slowMoFactor: number; // 1.0 = normal, 0.15 = slow
+  slowMoFactor: number;
   pendingBranch: BranchId | null;
-
-  // --- Demo / live mode flag ---
   isLive: boolean;
-
-  // --- Action log (for HUD) ---
+  /** Per-role narrative tags written on commitBranch, read by orchestrate. */
+  objectStates: Partial<Record<SemanticRole, string>>;
   actionLog: Array<{ id: string; t: number; text: string; kind: "info" | "action" | "branch" }>;
 
-  // --- Actions ---
   setLive: (live: boolean) => void;
   bootMain: () => void;
   setHoverObject: (obj: DetectedObject | null) => void;
@@ -84,11 +138,23 @@ function newChunkId() {
   return `chunk_${_chunkId}_${Date.now()}`;
 }
 
+function ambientChunk(branch: BranchId, prompt: string): VideoChunk {
+  return {
+    id: newChunkId(),
+    url: DEMO_ROOM,
+    source: "demo",
+    prompt,
+    branch,
+    durationSec: 10,
+    queuedAt: Date.now(),
+  };
+}
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
   primaryChunk: null,
   secondaryChunk: null,
   isBuffering: false,
-  branch: "main",
+  branch: "taking",
   hoverObject: null,
   lastDetections: [],
   lastClick: null,
@@ -97,34 +163,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   slowMoFactor: 1.0,
   pendingBranch: null,
   isLive: false,
+  objectStates: {},
   actionLog: [],
 
   setLive: (live) => set({ isLive: live }),
 
   bootMain: () => {
-    const chunk: VideoChunk = {
-      id: newChunkId(),
-      url: DEMO_BRANCH_URLS.main,
-      source: "demo",
-      prompt: "Procedural server room, ambient operation",
-      branch: "main",
-      durationSec: 6,
-      queuedAt: Date.now(),
-    };
-    // Pre-buffer neutral continuation (null hypothesis pre-generation strategy)
-    const secondary: VideoChunk = {
-      ...chunk,
-      id: newChunkId(),
-      url: DEMO_BRANCH_URLS.neutral,
-      branch: "neutral",
-    };
+    const chunk = ambientChunk(
+      "taking",
+      "16mm cutting room, ambient motion, dust, light shaft — the room waiting",
+    );
     set({
       primaryChunk: chunk,
-      secondaryChunk: secondary,
-      branch: "main",
+      secondaryChunk: ambientChunk("neutral", "ambient continuation"),
+      branch: "taking",
       isBuffering: false,
+      objectStates: {},
     });
-    get().logAction("System booted — main scene streaming", "info");
+    get().logAction("Cutting room opened · the room is waiting for you", "info");
+    eagerSeedUploadForLive();
   },
 
   setHoverObject: (obj) => set({ hoverObject: obj }),
@@ -151,7 +208,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     if (resp.detectedObject) {
       get().logAction(
         `Clicked: ${resp.detectedObject.label} (${resp.detectedObject.semanticRole})`,
-        "info"
+        "info",
       );
     }
   },
@@ -164,46 +221,56 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     set({ surfaces });
   },
 
-  enterSlowMo: () => set({ isSlowMo: true, slowMoFactor: 0.15 }),
+  enterSlowMo: () => set({ isSlowMo: true, slowMoFactor: 0.35 }),
   exitSlowMo: () => set({ isSlowMo: false, slowMoFactor: 1.0 }),
 
   commitBranch: (branch, videoUrl) => {
     const url = videoUrl ?? DEMO_BRANCH_URLS[branch];
+    const isLive = Boolean(videoUrl);
     const chunk: VideoChunk = {
       id: newChunkId(),
       url,
-      source: videoUrl ? "ltx23" : "demo",
+      source: isLive ? "ltx23" : "demo",
       prompt: `Branch: ${branch}`,
       branch,
       durationSec: 6,
       queuedAt: Date.now(),
+      rate: isLive ? 1.0 : undefined,
     };
+    // Stamp per-object narrative state so the next slate isn't a static menu.
+    const stamp = BRANCH_OBJECT_STATE[branch];
+    const objectStates = stamp
+      ? { ...get().objectStates, [stamp.role]: stamp.state }
+      : get().objectStates;
     set({
       primaryChunk: chunk,
       branch,
       isBuffering: false,
-      // Pre-buffer the next null hypothesis (neutral continuation)
-      secondaryChunk: {
-        ...chunk,
-        id: newChunkId(),
-        url: DEMO_BRANCH_URLS.neutral,
-        branch: "neutral",
-      },
+      objectStates,
+      // Live: FilmGate wraps the generated tail. Demo: keep ambient looping.
+      secondaryChunk: isLive
+        ? null
+        : ambientChunk("neutral", "ambient continuation"),
     });
-    get().logAction(`Branch committed → ${branch}`, "branch");
+    get().logAction(
+      isLive ? `Branch committed → ${branch} (live cut)` : `Branch committed → ${branch}`,
+      "branch",
+    );
   },
 
   queueSecondary: (branch, videoUrl) => {
-    const url = videoUrl ?? DEMO_BRANCH_URLS[branch];
-    const chunk: VideoChunk = {
-      id: newChunkId(),
-      url,
-      source: videoUrl ? "ltx23" : "demo",
-      prompt: `Pre-buffered: ${branch}`,
-      branch,
-      durationSec: 6,
-      queuedAt: Date.now(),
-    };
+    const chunk: VideoChunk = videoUrl
+      ? {
+          id: newChunkId(),
+          url: videoUrl,
+          source: "ltx23",
+          prompt: `Pre-buffered: ${branch}`,
+          branch,
+          durationSec: 6,
+          queuedAt: Date.now(),
+          rate: 1.0,
+        }
+      : ambientChunk(branch, `Pre-buffered: ${branch}`);
     set({ secondaryChunk: chunk });
   },
 
@@ -213,19 +280,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     set({
       primaryChunk: sec,
       branch: sec.branch,
-      // Pre-buffer the next neutral continuation as the new null hypothesis
-      secondaryChunk: {
-        ...sec,
-        id: newChunkId(),
-        url: DEMO_BRANCH_URLS.neutral,
-        branch: "neutral",
-      },
+      secondaryChunk: ambientChunk("neutral", "ambient continuation"),
     });
     get().logAction(`Seamless crossfade → ${sec.branch}`, "branch");
   },
 
   logAction: (text, kind = "info") => {
-    const entry = { id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, t: Date.now(), text, kind };
+    const entry = {
+      id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      t: Date.now(),
+      text,
+      kind,
+    };
     set({ actionLog: [entry, ...get().actionLog].slice(0, 50) });
   },
 }));

@@ -3,17 +3,25 @@
  *
  * Handles:
  *   - Florence-2 open-vocabulary detection
- *     (fal-ai/florence-2-large/open-vocabulary-detection)
- *   - LTX-2.3 video extension (fal-ai/ltx-2.3-quality/extend-video)
- *   - Veo 3.1 hero moments (fal-ai/veo3.1/fast/image-to-video)
+ *   - LTX-2.3 video extension
+ *   - Veo 3.1 hero moments
  *   - fal.storage.upload for client-captured mp4 blobs
  *
  * Single credential: process.env.FAL_KEY.
  * If absent, every call returns deterministic mock/demo data so the
  * hackathon demo always works offline.
+ *
+ * Credit-saving knobs (for testing with ~100 credits):
+ *   FAL_CHEAP=1              → cheaper LTX extend + skip Florence (use mock boxes)
+ *   FAL_EXTEND_MODEL=...     → override extend endpoint
+ *   FAL_EXTEND_DURATION=2    → seconds to generate (cheap path only; default 2)
+ *   FAL_MOCK_DETECT=1        → never call Florence (free click testing)
+ *   FAL_SKIP_VEO=1           → summon_operator falls through to LTX / demo
  */
 
 import { fal } from "@fal-ai/client";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { DetectedObject, NormalizedBBox, SemanticRole } from "./types";
 
 // ============================================================================
@@ -21,6 +29,51 @@ import type { DetectedObject, NormalizedBBox, SemanticRole } from "./types";
 // ============================================================================
 
 const FAL_KEY = process.env.FAL_KEY || process.env.FAL_API_KEY || "";
+
+/** Pitch-day + cheap-test extend (same schema; cheap just shortens the clip). */
+const EXTEND_MODEL_QUALITY = "fal-ai/ltx-2.3-quality/extend-video";
+/**
+ * Partner "duration" extend — needs ≥73 source frames and is flaky/slow on
+ * long seeds. Only used if FAL_EXTEND_MODEL points here explicitly.
+ */
+const EXTEND_MODEL_DURATION = "fal-ai/ltx-2.3/extend-video";
+
+const cheapMode = () =>
+  String(process.env.FAL_CHEAP ?? "").toLowerCase() === "1" ||
+  String(process.env.FAL_CHEAP ?? "").toLowerCase() === "true";
+
+const mockDetect = () =>
+  cheapMode() ||
+  String(process.env.FAL_MOCK_DETECT ?? "").toLowerCase() === "1" ||
+  String(process.env.FAL_MOCK_DETECT ?? "").toLowerCase() === "true";
+
+export const skipVeo = () =>
+  cheapMode() ||
+  String(process.env.FAL_SKIP_VEO ?? "").toLowerCase() === "1" ||
+  String(process.env.FAL_SKIP_VEO ?? "").toLowerCase() === "true";
+
+/** Skip LLM entirely (surfaces + rewrite). Catalog / planBranch only. */
+export const skipLlm = () =>
+  String(process.env.FAL_SKIP_LLM ?? "").toLowerCase() === "1" ||
+  String(process.env.FAL_SKIP_LLM ?? "").toLowerCase() === "true";
+
+/**
+ * Skip prompt-rewrite LLM only. FAL_CHEAP still authors surfaces via LLM so
+ * buttons track the current branch, but skips the rewrite call to save tokens.
+ */
+export const skipPromptRewrite = () => cheapMode() || skipLlm();
+
+export const isCheapMode = () => cheapMode();
+
+function extendModel() {
+  // Default BOTH modes to the quality endpoint — reliable schema.
+  // Override with FAL_EXTEND_MODEL=fal-ai/ltx-2.3/extend-video if you want.
+  return process.env.FAL_EXTEND_MODEL || EXTEND_MODEL_QUALITY;
+}
+
+function usesDurationApi(model: string) {
+  return model === EXTEND_MODEL_DURATION || model.includes("/ltx-2.3/extend-video");
+}
 
 export const isLiveMode = () => FAL_KEY.length > 0;
 
@@ -39,17 +92,19 @@ function ensureRegistered() {
  * orchestrator can map bboxes ↦ SemanticRole without a second model call.
  */
 const FLORENCE_VOCAB =
-  "server rack, computer rack, control terminal, console, operator desk, " +
-  "cooling vent, air vent, hvac duct";
+  "film reels, steenbeck flatbed editor, splice block, bolex camera, tripod, " +
+  "typewriter, mug of coffee, wall intercom, light shaft, window";
 
-// Map Florence-2 label substrings → SemanticRole.
+// Map Florence-2 label substrings → SemanticRole for the cutting room scene.
 function labelToRole(label: string): SemanticRole {
   const l = label.toLowerCase();
-  if (/rack|server|cabinet|chassis/.test(l)) return "faulty_asset";
-  if (/terminal|console|desk|screen|monitor|operator/.test(l)) return "operator_interface";
-  if (/vent|cool|hvac|duct|fan/.test(l)) return "hvac_component";
-  if (/security|door|lock/.test(l)) return "security_node";
-  if (/stream|cable|wire|pipe/.test(l)) return "data_stream";
+  if (/reel|steenbeck|splice|flatbed|film/.test(l)) return "film_source";
+  if (/bolex|camera|tripod|lens/.test(l)) return "camera_asset";
+  if (/typewriter|paper|note|page|carriage/.test(l)) return "manuscript";
+  if (/mug|coffee|cup|saucer/.test(l)) return "artifact_unset";
+  if (/intercom|speaker|panel|console|desk/.test(l)) return "operator_interface";
+  if (/light|shaft|beam|window|sun/.test(l)) return "vfx_element";
+  if (/ocean|coast|sea|view/.test(l)) return "scene_extern";
   return "unknown";
 }
 
@@ -82,12 +137,12 @@ interface FlorenceResponse {
  */
 export async function detectObjects(
   frameBase64: string,
-  sceneId = "main"
+  sceneId = "cutting_room_7"
 ): Promise<DetectedObject[]> {
   ensureRegistered();
 
-  // DEMO MODE
-  if (!isLiveMode()) {
+  // DEMO / CHEAP TEST — fixed hotspots, $0 detection cost
+  if (!isLiveMode() || mockDetect()) {
     return getMockDetections(sceneId);
   }
 
@@ -168,12 +223,62 @@ export async function uploadVideoBlob(blob: Blob): Promise<string> {
   ensureRegistered();
   if (!isLiveMode()) return "";
   try {
-    const file = new File([blob], `capture-${Date.now()}.mp4`, { type: blob.type || "video/mp4" });
+    const mime = (blob.type || "video/mp4").split(";")[0] || "video/mp4";
+    const ext = mime.includes("webm") ? "webm" : mime.includes("mp4") ? "mp4" : "bin";
+    const file = new File([blob], `capture-${Date.now()}.${ext}`, { type: mime });
     return await fal.storage.upload(file);
   } catch (err) {
     console.error("[fal-client] storage.upload error:", err);
     return "";
   }
+}
+
+/** True when the client capture is likely unusable as an LTX seed (Chrome → WebM). */
+function isUsableMp4Seed(blob: Blob | null | undefined): boolean {
+  if (!blob || blob.size < 8_000) return false;
+  const t = (blob.type || "").toLowerCase();
+  // LTX extend is picky — WebM/VP8/VP9 captures routinely 422.
+  if (t.includes("webm") || t.includes("vp8") || t.includes("vp9")) return false;
+  return t.includes("mp4") || t.includes("quicktime") || t === "" || t === "application/octet-stream";
+}
+
+/** Cache so we don't re-upload on every click. */
+let _roomSeedUrl: string | null = null;
+
+/**
+ * Upload a short ambient seed (room_seed.mp4 ≈4s / 96 frames, else room_loop).
+ * MediaRecorder clips are ~7–10 frames — LTX rejects those with 422.
+ */
+export async function uploadRoomLoopSeed(): Promise<string> {
+  ensureRegistered();
+  if (!isLiveMode()) return "";
+  if (_roomSeedUrl) return _roomSeedUrl;
+  try {
+    const canvasDir = path.join(process.cwd(), "public", "canvas");
+    const seedPath = path.join(canvasDir, "room_seed.mp4");
+    const loopPath = path.join(canvasDir, "room_loop.mp4");
+    const { existsSync } = await import("node:fs");
+    const filePath = existsSync(seedPath) ? seedPath : loopPath;
+    const buf = await readFile(filePath);
+    const name = path.basename(filePath);
+    const file = new File([buf], name, { type: "video/mp4" });
+    const url = await fal.storage.upload(file);
+    _roomSeedUrl = url;
+    console.log(`[fal-client] seeded extend from ${name} (${(buf.length / 1024).toFixed(0)} KiB)`);
+    return url;
+  } catch (err) {
+    console.error("[fal-client] room seed upload failed:", err);
+    return "";
+  }
+}
+
+/**
+ * Resolve a fal-hosted video_url for extend-video.
+ * Always prefer the pre-baked room seed — client captures are too short.
+ */
+export async function resolveExtendSeed(_blob: Blob | null | undefined): Promise<string> {
+  console.log("[fal-client] extend seed: room_seed/room_loop (captures are <73 frames)");
+  return uploadRoomLoopSeed();
 }
 
 // ============================================================================
@@ -192,6 +297,11 @@ export interface ExtendVideoParams {
   prompt: string;
   numFrames?: number;
   numContextFrames?: number;
+  /** 1.0 = lock overlap to source (default for pitch). Lower = more rewrite freedom. */
+  videoStrength?: number;
+  negativePrompt?: string;
+  /** Cutaways may turn this on; locked room beats keep it off. */
+  enablePromptExpansion?: boolean;
 }
 export interface GeneratedVideo {
   url: string;
@@ -203,17 +313,27 @@ const LTX_DEFAULT_NUM_FRAMES = 25;
 const LTX_DEFAULT_CONTEXT_FRAMES = 17; // snapped to 8k+1 by server (17 = 2*8+1)
 
 /**
- * Generate a video chunk using LTX-2.3 quality extend-video.
+ * Generate a video chunk using LTX extend-video.
  *
- * @param params.videoUrl  URL of the source video (recent clip captured client-side
- *                         and uploaded via `uploadVideoBlob`).
- * @param params.prompt    Text prompt describing how the scene should continue.
+ * Pitch: `fal-ai/ltx-2.3-quality/extend-video`
+ * Test:  `FAL_CHEAP=1` → `fal-ai/ltx-2.3/extend-video` (~$0.10/s, short duration)
  */
 export async function extendVideo(params: ExtendVideoParams): Promise<GeneratedVideo> {
   ensureRegistered();
 
-  const numFrames = params.numFrames ?? LTX_DEFAULT_NUM_FRAMES;
-  const numContextFrames = params.numContextFrames ?? LTX_DEFAULT_CONTEXT_FRAMES;
+  const model = extendModel();
+  const durationApi = usesDurationApi(model);
+  const cheapDuration = Math.min(
+    20,
+    Math.max(2, Number(process.env.FAL_EXTEND_DURATION ?? 2)),
+  );
+  // num_frames includes context — new motion ≈ (num_frames - context) / fps
+  // Cheap: enough NEW frames (~3s) that the seek-past-seed cut actually reads.
+  const numFrames = params.numFrames ?? (cheapMode() ? 97 : 121);
+  // ~25 context frames + strength 0.8: enough overlap for continuity without
+  // locking the extend into near-static (1.0 / heavy context was freezing motion).
+  const numContextFrames =
+    params.numContextFrames ?? (cheapMode() ? 17 : 25);
 
   // DEMO MODE
   if (!isLiveMode()) {
@@ -221,24 +341,55 @@ export async function extendVideo(params: ExtendVideoParams): Promise<GeneratedV
     return { url: "", prompt: params.prompt, durationSec: numFrames / 24 };
   }
 
+  // Soft cap — was 600 and silently cut off FRAME_LOCK after MOVES.
+  const prompt =
+    params.prompt.length > 1400 ? `${params.prompt.slice(0, 1397)}…` : params.prompt;
+
   try {
-    const result = (await fal.subscribe("fal-ai/ltx-2.3-quality/extend-video", {
-      input: {
-        prompt: params.prompt,
-        video_url: params.videoUrl,
-        num_frames: numFrames,
-        num_context_frames: numContextFrames,
-        extend_direction: "forward",
-        resolution: "auto",
-        match_input_fps: true,
-        frames_per_second: 24,
-        video_strength: 1, // lock the seam to the source for a seamless crossfade
-        guidance_scale: 1,
-        num_inference_steps: 18,
-        generate_audio: true,
-        video_quality: "high",
+    const input = durationApi
+      ? {
+          video_url: params.videoUrl,
+          prompt,
+          duration: cheapDuration,
+          mode: "end" as const,
+          context: 1,
+        }
+      : {
+          prompt,
+          video_url: params.videoUrl,
+          num_frames: numFrames,
+          // More context overlap = harder for the model to invent a new room mid-extend
+          num_context_frames: numContextFrames,
+          extend_direction: "forward",
+          resolution: cheapMode() ? "landscape_16_9" : "auto",
+          match_input_fps: true,
+          frames_per_second: 24,
+          // API default 1.0 locks overlap to source (near-static). 0.8 lets motion through.
+          video_strength:
+            params.videoStrength ?? (cheapMode() ? 0.55 : 0.8),
+          guidance_scale: cheapMode() ? 5 : 1.5,
+          num_inference_steps: cheapMode() ? 16 : 20,
+          generate_audio: !cheapMode(),
+          video_quality: cheapMode() ? "medium" : "high",
+          // Expansion invents lamps/fog/new walls — off for locked room beats.
+          enable_prompt_expansion: params.enablePromptExpansion ?? false,
+          ...(params.negativePrompt
+            ? { negative_prompt: params.negativePrompt }
+            : {}),
+        };
+
+    console.log(
+      `[fal-client] extend via ${model}${durationApi ? ` (${cheapDuration}s)` : ` frames=${numFrames}`} seed=${params.videoUrl.slice(0, 72)}…`,
+    );
+    const result = (await fal.subscribe(model, {
+      input,
+      logs: true,
+      onQueueUpdate: (update) => {
+        if (update.status === "IN_PROGRESS" && update.logs?.length) {
+          const last = update.logs[update.logs.length - 1]?.message;
+          if (last) console.log(`[fal-client] ltx: ${last}`);
+        }
       },
-      logs: false,
     })) as unknown as {
       data?: { video?: { url?: string; duration?: number }; prompt?: string };
     } | { video?: { url?: string; duration?: number }; prompt?: string };
@@ -246,11 +397,18 @@ export async function extendVideo(params: ExtendVideoParams): Promise<GeneratedV
       .data ?? (result as { video?: { url?: string; duration?: number }; prompt?: string });
     const video = data.video;
     const url = (video?.url as string | undefined) ?? "";
-    const durationSec = typeof video?.duration === "number" ? video.duration : numFrames / 24;
-    return { url, prompt: data.prompt ?? params.prompt, durationSec };
+    const fallbackDur = durationApi ? cheapDuration : (numFrames - numContextFrames) / 24;
+    const durationSec = typeof video?.duration === "number" ? video.duration : fallbackDur;
+    if (url) console.log(`[fal-client] extend OK → ${url.slice(0, 80)}…`);
+    return { url, prompt: data.prompt ?? prompt, durationSec };
   } catch (err) {
-    console.error("[fal-client] LTX-2.3 extend-video error:", err);
-    throw err;
+    const body =
+      err && typeof err === "object" && "body" in err
+        ? JSON.stringify((err as { body: unknown }).body)
+        : "";
+    console.error("[fal-client] LTX extend-video error:", err);
+    if (body) console.error("[fal-client] LTX 422 body:", body);
+    return { url: "", prompt, durationSec: durationApi ? cheapDuration : numFrames / 24 };
   }
 }
 
@@ -261,22 +419,50 @@ export async function extendVideo(params: ExtendVideoParams): Promise<GeneratedV
 export interface VeoHeroParams {
   imageUrl: string; // base64 data URI or hosted URL
   prompt: string;
+  negativePrompt?: string;
   duration?: "4s" | "6s" | "8s";
   aspectRatio?: "16:9" | "9:16" | "auto";
   resolution?: "720p" | "1080p"; // "4k" is documented but the client lib omits it
   generateAudio?: boolean;
+  /** Default: full Veo 3.1 (not fast) — hero needs the quality. */
+  useFast?: boolean;
+}
+
+/**
+ * Resolve a fal-hosted image URL for Veo.
+ * Data URIs often 422 on veo3.1/fast — upload to fal.storage first.
+ */
+async function resolveVeoImageUrl(imageUrl: string): Promise<string> {
+  if (!imageUrl.startsWith("data:")) return imageUrl;
+  const m = /^data:([^;]+);base64,(.+)$/s.exec(imageUrl);
+  if (!m) throw new Error("Veo seed: invalid data URI");
+  const mime = m[1] || "image/jpeg";
+  const buf = Buffer.from(m[2]!, "base64");
+  const ext = mime.includes("png") ? "png" : "jpg";
+  const file = new File([buf], `veo-seed-${Date.now()}.${ext}`, { type: mime });
+  const url = await fal.storage.upload(file);
+  console.log(`[fal-client] Veo seed uploaded (${(buf.length / 1024).toFixed(0)} KiB)`);
+  return url;
 }
 
 /**
  * Generate a "hero" cinematic moment from a seed image using Veo 3.1 fast.
- * Used for the `summon_operator` action: highest-fidelity arc beat in the
- * branching story — operator intervenes, room transforms, etc.
+ * Used for the `summon_operator` action: highest-fidelity arc beat.
  */
 export async function generateVeoHero(params: VeoHeroParams): Promise<GeneratedVideo> {
   ensureRegistered();
 
   const durSecMap = { "4s": 4, "6s": 6, "8s": 8 } as const;
   const durationSec = durSecMap[params.duration ?? "8s"];
+
+  // Hard guard — never hit Veo while FAL_CHEAP / FAL_SKIP_VEO is on.
+  // There is no "cheap Veo" endpoint; skipping must mean zero Veo calls.
+  if (skipVeo()) {
+    console.warn(
+      "[fal-client] generateVeoHero blocked (FAL_CHEAP / FAL_SKIP_VEO) — no Veo bill",
+    );
+    return { url: "", prompt: params.prompt, durationSec };
+  }
 
   // DEMO MODE
   if (!isLiveMode()) {
@@ -285,17 +471,26 @@ export async function generateVeoHero(params: VeoHeroParams): Promise<GeneratedV
   }
 
   try {
-    const imageUrl = params.imageUrl.startsWith("data:")
-      ? params.imageUrl
-      : params.imageUrl;
-    const result = (await fal.subscribe("fal-ai/veo3.1/fast/image-to-video", {
+    const imageUrl = await resolveVeoImageUrl(params.imageUrl);
+    // Full Veo 3.1 for the hero (not fast) — fast reads plastic on faces.
+    // Prefer 16:9 + hosted URL — data URI / aspect "auto" has 422'd in practice.
+    const endpoint = params.useFast
+      ? "fal-ai/veo3.1/fast/image-to-video"
+      : "fal-ai/veo3.1/image-to-video";
+    console.log(`[fal-client] Veo hero → ${endpoint}`);
+    const result = (await fal.subscribe(endpoint, {
       input: {
         prompt: params.prompt,
         image_url: imageUrl,
         duration: params.duration ?? "8s",
-        aspect_ratio: params.aspectRatio ?? "auto",
+        aspect_ratio: params.aspectRatio ?? "16:9",
         resolution: params.resolution ?? "720p",
         generate_audio: params.generateAudio ?? true,
+        auto_fix: true,
+        safety_tolerance: "5",
+        ...(params.negativePrompt
+          ? { negative_prompt: params.negativePrompt }
+          : {}),
       },
       logs: false,
     })) as unknown;
@@ -305,9 +500,30 @@ export async function generateVeoHero(params: VeoHeroParams): Promise<GeneratedV
     const url = (video?.url as string | undefined) ?? "";
     return { url, prompt: data.prompt ?? params.prompt, durationSec };
   } catch (err) {
-    console.error("[fal-client] Veo 3.1 error:", err);
+    const body = (err as { body?: unknown })?.body;
+    console.error(
+      "[fal-client] Veo 3.1 error:",
+      body ? JSON.stringify(body, null, 2) : err,
+    );
     throw err;
   }
+}
+
+/** Upload poster.jpg (or a room_seed frame) for Veo / demo hero generation. */
+export async function uploadVeoSeedStill(): Promise<string> {
+  ensureRegistered();
+  if (!isLiveMode()) return "";
+  const canvasDir = path.join(process.cwd(), "public", "canvas");
+  const poster = path.join(canvasDir, "poster.jpg");
+  const { existsSync } = await import("node:fs");
+  if (!existsSync(poster)) {
+    throw new Error("poster.jpg missing — needed as Veo seed still");
+  }
+  const buf = await readFile(poster);
+  const file = new File([buf], "poster.jpg", { type: "image/jpeg" });
+  const url = await fal.storage.upload(file);
+  console.log(`[fal-client] Veo poster seed ${(buf.length / 1024).toFixed(0)} KiB → ${url.slice(0, 60)}…`);
+  return url;
 }
 
 // ============================================================================
@@ -330,22 +546,46 @@ function clamp01(n: number): number {
 function getMockDetections(sceneId: string): DetectedObject[] {
   const base: Array<[string, string, NormalizedBBox, SemanticRole]> = [
     [
-      "rack_7a",
-      "Server Rack 7-A",
-      { x1: 0.18, y1: 0.2, x2: 0.42, y2: 0.85 },
-      "faulty_asset",
+      "steenbeck_reels",
+      "Steenbeck Flatbed",
+      { x1: 0.06, y1: 0.42, x2: 0.46, y2: 0.86 },
+      "film_source",
     ],
     [
-      "terminal_1",
-      "Control Terminal",
-      { x1: 0.55, y1: 0.3, x2: 0.92, y2: 0.78 },
+      "bolex_tripod",
+      "Bolex on Tripod",
+      { x1: 0.62, y1: 0.18, x2: 0.86, y2: 0.72 },
+      "camera_asset",
+    ],
+    [
+      "typewriter_note",
+      "Royal Typewriter",
+      { x1: 0.4, y1: 0.3, x2: 0.66, y2: 0.62 },
+      "manuscript",
+    ],
+    [
+      "cold_coffee",
+      "Cold Coffee",
+      { x1: 0.5, y1: 0.66, x2: 0.6, y2: 0.78 },
+      "artifact_unset",
+    ],
+    [
+      "wall_intercom",
+      "Wall Intercom",
+      { x1: 0.84, y1: 0.08, x2: 0.97, y2: 0.3 },
       "operator_interface",
     ],
     [
-      "vent_1",
-      "Cooling Vent",
-      { x1: 0.44, y1: 0.05, x2: 0.62, y2: 0.18 },
-      "hvac_component",
+      "light_shaft",
+      "Light Shaft",
+      { x1: 0.2, y1: 0.04, x2: 0.4, y2: 0.4 },
+      "vfx_element",
+    ],
+    [
+      "window_ocean",
+      "Window, Pacific",
+      { x1: 0.86, y1: 0.32, x2: 1, y2: 0.66 },
+      "scene_extern",
     ],
   ];
   return base.map(([id, label, bbox, role]) => ({
